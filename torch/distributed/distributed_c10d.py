@@ -187,15 +187,31 @@ class _reduce_op(object):
 
 reduce_op = _reduce_op()
 
+class World:
+    def __init__(self):
+        self.world = None
+
+_world = World()
+
+def set_c10d_world(world):
+    _world = world
 
 class group(object):
     # Points to the default PG once initialized.
-    WORLD: Optional[ProcessGroup] = None
-
+    @classmethod
+    @property
+    def WORLD(cls) -> Optional[ProcessGroup]:
+        if not hasattr(_world, "world"):
+            return None
+        return _world.world
 
 class GroupMember(object):
     # Alias to group.WORLD for backward compatibility
-    WORLD = group.WORLD
+    @classmethod
+    @property
+    def WORLD(cls) -> Optional[ProcessGroup]:
+        return group.WORLD
+
     NON_GROUP_MEMBER = object()
 
 
@@ -448,7 +464,7 @@ def _get_default_store():
 
 
 def _update_default_pg(pg):
-    GroupMember.WORLD = group.WORLD = pg
+    _world.world = pg
 
 
 def get_backend(group=None):
