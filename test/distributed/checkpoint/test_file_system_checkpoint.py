@@ -222,8 +222,10 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
         return paths[0]
 
     def load_tensor(self, tensor: ShardedTensor) -> torch.Tensor:
-        res = torch.zeros(tensor.shape, device="cpu") if dist.get_rank() == 0 else None
+        res = torch.zeros(tensor.shape, device="cuda:0") if dist.get_rank() == 0 else None
         tensor.gather(out=res)
+        if res is not None:
+            res = res.cpu()
         return cast(Tensor, res)
 
     @with_comms(init_rpc=False)
@@ -361,8 +363,9 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
             ],
         )
 
-        shutil.rmtree(path, ignore_errors=True)
-        os.makedirs(path)
+        if dist.get_rank() == 0:
+            shutil.rmtree(path, ignore_errors=True)
+            os.makedirs(path)
         dist.barrier()
 
         model_to_save = MyShardedModel3(src_spec)
