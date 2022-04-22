@@ -47,9 +47,9 @@ if TEST_WITH_DEV_DBG_ASAN:
 
 def _custom_gather(
         self,
-        dst = 0,
-        out = None,
-    ):
+        dst=0,
+        out=None,
+):
     """
     Creates a full :class:`Tensor` on rank ``dst`` by gathering all shards of the
     sharded tensor.
@@ -79,7 +79,7 @@ def _custom_gather(
     max_rank_size = 0
     shard_placement = dict()
     local_shards_placement = []
-    #collect sizes
+    # Collect sizes
     for shard_idx, shard_md in enumerate(self.metadata().shards_metadata):
         shard_rank = shard_md.placement.rank()
         shard_placement[shard_idx] = (shard_rank, rank_sizes[shard_rank])
@@ -94,9 +94,9 @@ def _custom_gather(
         # print(f"rank_sizes: {rank_sizes}")
         gather_list = [torch.empty((max_rank_size,), device=out.device) for _ in range(world_size)]
     else:
-        gather_list= None
+        gather_list = None
 
-    #FIXME is a rank allowed to not have any data
+    # FIXME is a rank allowed to not have any data?
     with torch.no_grad():
         # XXX we can fastpath this to torch.cat if max_rank_size == rank_sizes[rank]
         data = torch.empty(max_rank_size, device=self.local_shards()[0].tensor.device)
