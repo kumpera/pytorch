@@ -79,7 +79,7 @@ def _custom_gather(
     max_rank_size = 0
     shard_placement = dict()
     local_shards_placement = []
-    # Collect sizes
+    # collect sizes
     for shard_idx, shard_md in enumerate(self.metadata().shards_metadata):
         shard_rank = shard_md.placement.rank()
         shard_placement[shard_idx] = (shard_rank, rank_sizes[shard_rank])
@@ -91,7 +91,6 @@ def _custom_gather(
 
 
     if rank == dst:
-        # print(f"rank_sizes: {rank_sizes}")
         gather_list = [torch.empty((max_rank_size,), device=out.device) for _ in range(world_size)]
     else:
         gather_list = None
@@ -259,7 +258,7 @@ class TestDistributedStateDictSaveLoadWithSharedTensor(ShardedTensorTestBase):
     @with_comms(init_rpc=False)
     @skip_if_lt_x_gpu(2)
     @requires_nccl()
-    def test_read_write_shard_tenosr(self) -> None:
+    def test_read_write_shard_tensor(self) -> None:
         paths = [tempfile.mkdtemp()]
         dist.broadcast_object_list(paths)
 
@@ -325,6 +324,8 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
     @requires_nccl()
     def test_load_with_different_shard_plan(self) -> None:
         path = self.get_file_path()
+        # We hardcode the assumption of how many shards are around
+        self.assertEqual(self.world_size, dist.get_world_size())
 
         specs = [
             # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
@@ -421,12 +422,11 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
                 )
 
                 dist.barrier()
-
                 store_tensor = self.load_tensor(model_to_save.sharded_tensor)
+                dist.barrier()
                 load_tensor = self.load_tensor(model_to_load.sharded_tensor)
 
                 if dist.get_rank() == 0:
-
                     self.assertTrue(
                         torch.allclose(store_tensor, load_tensor), msg=f"{s0} vs {s1}"
                     )
@@ -436,6 +436,7 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
     @requires_nccl()
     def test_load_rowwise_to_colwise(self) -> None:
         path = self.get_file_path()
+        self.assertEqual(self.world_size, dist.get_world_size())
 
         # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
         src_spec = ChunkShardingSpec(
@@ -479,6 +480,7 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
 
         # We can't use torch.allclose since each ST has a different sharding spec
         store_tensor = self.load_tensor(model_to_save.sharded_tensor)
+        dist.barrier()
         load_tensor = self.load_tensor(model_to_load.sharded_tensor)
 
         if dist.get_rank() == 0:
