@@ -6,21 +6,15 @@ import torch.distributed as dist
 from torch import Tensor
 from torch.distributed._shard.sharded_tensor import (
     ShardedTensor,
-    ShardedTensorMetadata,
-    TensorProperties,
-    ShardMetadata,
 )
 
 from .metadata import (
     Metadata,
     BytesWriteRequest,
     TensorStorageMetadata,
-    ShardStorageMetadata,
-    ShardedTensorStorageMetadata,
-    TensorStorageMetadata,
     TensorWriteRequest,
 )
-from .resharding import prepare_sharded_tensor_write
+from .resharding import _prepare_sharded_tensor_write
 from .storage_writer import StorageWriter
 
 # -------------- private functions --------------
@@ -29,8 +23,8 @@ def _compute_tensor_md(fqn: str, tensor: Tensor) -> TensorStorageMetadata:
     storage_size = tensor.nelement() * tensor.element_size()
 
     return TensorStorageMetadata(
-        storage_key= fqn,
-        length= storage_size,
+        storage_key=fqn,
+        length=storage_size,
     )
 
 
@@ -84,7 +78,7 @@ def _prepare(
                 )
                 metadata.state_dict_metadata[fqn] = _compute_tensor_md(fqn, obj)
         elif isinstance(obj, ShardedTensor):
-            write_reqs, md = prepare_sharded_tensor_write(obj, fqn)
+            write_reqs, md = _prepare_sharded_tensor_write(obj, fqn)
             tensor_write_requests += write_reqs
             metadata.state_dict_metadata[fqn] = md
         else:

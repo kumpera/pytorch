@@ -20,7 +20,7 @@ from .metadata import (
     TensorStorageMetadata,
 )
 from .resharding import (
-    prepare_sharded_tensor_read,
+    _prepare_sharded_tensor_read,
     _shards_get_overlap_region_wrt_saved_tensor
 )
 from .storage_reader import StorageReader
@@ -30,17 +30,13 @@ def _reshard_and_prepare_read_request(
     state_dict: Dict[str, Any], metadata_from_storage: Metadata
 ) -> Tuple[List[BytesReadRequest], List[TensorReadRequest]]:
     """
-    Use the loaded metadata and the current state dict to map the saved tensors to current tensors
-
-    NOTE:
-    During the save,
+    Use the loaded metadata and the current state dict to map the saved tensors to current tensor
     """
     tensor_read_requests = []
     bytes_read_requests = []
     for fqn, obj in state_dict.items():
         if isinstance(obj, torch.Tensor):
             tensor = obj.detach()
-            storage_size = tensor.nelement() * tensor.element_size()
 
             rr = TensorReadRequest(
                 tensor=tensor,
@@ -52,7 +48,13 @@ def _reshard_and_prepare_read_request(
             tensor_read_requests.append(rr)
         elif isinstance(obj, ShardedTensor):
             md = metadata_from_storage.state_dict_metadata[fqn]
-            tensor_read_requests += prepare_sharded_tensor_read(md, obj)
+            if isinstance(md, ShardedTensorStorageMetadata):
+                tensor_read_requests += _prepare_sharded_tensor_read(md, obj)
+            else:
+                raise ValueError(
+                    f"Invalid checkpoint metadata for {fqn}, " +
+                    "expected ShardedTensorStorageMetadata but found {type(md)}"
+                )
         else:
             # This is actually hard to handle correctly
             # If the value is not a tensor but any random obj,
@@ -134,7 +136,7 @@ def load_state_dict(
 
 
 def _validate_sharded_tensor(
-    tensor_md: ShardedTensorMetadata, checkpoint_md: ShardedTensorMetadata
+    tensor_md: ShardedTensorMetadata, checkpoint_md: ShardedTensorStorageMetadata
 ) -> List[str]:
     # We assume the incoming tensor has being validated during construction
 
@@ -211,11 +213,11 @@ def validate_metadata(
             if not isinstance(md, TensorStorageMetadata):
                 res.append(f"{fqn}: Expected TensorStorageMetadata but found: {type(md)}")
                 continue
-            md_size = md.length
-            tensor_size = obj.numel() * obj.element_size()
-            if md_size != tensor_size:
+            md_len = md.length
+            tensor_len = obj.numel() * obj.element_size()
+            if md_len != tensor_len:
                 res.append(
-                    f"{fqn}: Incompatible tensor size: expected {tensor_size} but found {md_size}"
+                    f"{fqn}: Incompatible tensor size: expected {tensor_len} but found {md_len}"
                 )
         elif isinstance(obj, ShardedTensor):
             if fqn not in metadata.state_dict_metadata:
