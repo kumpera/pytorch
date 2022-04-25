@@ -186,7 +186,7 @@ class MyShardedModel3(torch.nn.Module):
         spec: ShardingSpec,
     ) -> None:
         super(MyShardedModel3, self).__init__()
-        self.sharded_tensor: ShardedTensor = sharded_tensor.empty(
+        self.sharded_tensor: ShardedTensor = sharded_tensor.rand(
             spec, 10, 20, init_rrefs=False
         )
 
@@ -202,7 +202,7 @@ class MyShardedModel2(torch.nn.Module):
     ) -> None:
         super(MyShardedModel2, self).__init__()
         if spec is not None:
-            self.sharded_tensor2 = sharded_tensor.empty(
+            self.sharded_tensor2 = sharded_tensor.rand(
                 spec, 10, 20, process_group=group, init_rrefs=False
             )
         else:
@@ -220,7 +220,7 @@ class MyShardedModel1(torch.nn.Module):
     ) -> None:
         super(MyShardedModel1, self).__init__()
         if spec is not None:
-            self.sharded_tensor1 = sharded_tensor.empty(
+            self.sharded_tensor1 = sharded_tensor.rand(
                 spec, 10, 20, process_group=group, init_rrefs=False
             )
         else:
@@ -465,6 +465,220 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
         model_to_save = MyShardedModel3(src_spec)
         model_to_save._register_state_dict_hook(state_dict_hook)
         state_dict_to_save = model_to_save.state_dict()
+        dist.barrier()
+
+
+        fs_writer = FileSystemWriter(path=path)
+        save_state_dict(state_dict=state_dict_to_save, storage_writer=fs_writer)
+        dist.barrier()
+
+        model_to_load = MyShardedModel3(dst_spec)
+        model_to_load._register_state_dict_hook(state_dict_hook)
+        state_dict_to_load_to = model_to_load.state_dict()
+        dist.barrier()
+
+        fs_reader = FileSystemReader(path=path)
+
+        load_state_dict(state_dict=state_dict_to_load_to, storage_reader=fs_reader)
+        dist.barrier()
+
+        # We can't use torch.allclose since each ST has a different sharding spec
+        store_tensor = self.load_tensor(model_to_save.sharded_tensor)
+        dist.barrier()
+        load_tensor = self.load_tensor(model_to_load.sharded_tensor)
+
+        if dist.get_rank() == 0:
+            self.assertTrue(torch.allclose(store_tensor, load_tensor))
+
+    @with_comms(init_rpc=False)
+    @skip_if_lt_x_gpu(2)
+    @requires_nccl()
+    def test_load_rowwise_to_colwise_1(self) -> None:
+        path = self.get_file_path()
+        self.assertEqual(self.world_size, dist.get_world_size())
+
+        # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
+        src_spec = ChunkShardingSpec(
+            dim=0,
+            placements=[
+                "rank:0/cuda:0",
+                "rank:1/cuda:1",
+            ],
+        )
+
+        # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
+        dst_spec = ChunkShardingSpec(
+            dim=1,
+            placements=[
+                "rank:0/cuda:0",
+                "rank:1/cuda:1",
+            ],
+        )
+
+        if dist.get_rank() == 0:
+            shutil.rmtree(path, ignore_errors=True)
+            os.makedirs(path)
+        dist.barrier()
+
+
+    @with_comms(init_rpc=False)
+    @skip_if_lt_x_gpu(2)
+    @requires_nccl()
+    def test_load_rowwise_to_colwise_2(self) -> None:
+        path = self.get_file_path()
+        self.assertEqual(self.world_size, dist.get_world_size())
+
+        # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
+        src_spec = ChunkShardingSpec(
+            dim=0,
+            placements=[
+                "rank:0/cuda:0",
+                "rank:1/cuda:1",
+            ],
+        )
+
+        # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
+        dst_spec = ChunkShardingSpec(
+            dim=1,
+            placements=[
+                "rank:0/cuda:0",
+                "rank:1/cuda:1",
+            ],
+        )
+
+        if dist.get_rank() == 0:
+            shutil.rmtree(path, ignore_errors=True)
+            os.makedirs(path)
+        dist.barrier()
+
+        model_to_save = MyShardedModel3(src_spec)
+        model_to_save._register_state_dict_hook(state_dict_hook)
+        state_dict_to_save = model_to_save.state_dict()
+
+        fs_writer = FileSystemWriter(path=path)
+
+        dist.barrier()
+
+
+    @with_comms(init_rpc=False)
+    @skip_if_lt_x_gpu(2)
+    @requires_nccl()
+    def test_load_rowwise_to_colwise_3(self) -> None:
+        path = self.get_file_path()
+        self.assertEqual(self.world_size, dist.get_world_size())
+
+        # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
+        src_spec = ChunkShardingSpec(
+            dim=0,
+            placements=[
+                "rank:0/cuda:0",
+                "rank:1/cuda:1",
+            ],
+        )
+
+        # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
+        dst_spec = ChunkShardingSpec(
+            dim=1,
+            placements=[
+                "rank:0/cuda:0",
+                "rank:1/cuda:1",
+            ],
+        )
+
+        if dist.get_rank() == 0:
+            shutil.rmtree(path, ignore_errors=True)
+            os.makedirs(path)
+        dist.barrier()
+
+        model_to_save = MyShardedModel3(src_spec)
+        model_to_save._register_state_dict_hook(state_dict_hook)
+        state_dict_to_save = model_to_save.state_dict()
+
+        fs_writer = FileSystemWriter(path=path)
+        save_state_dict(state_dict=state_dict_to_save, storage_writer=fs_writer)
+
+        dist.barrier()
+
+
+
+
+    @with_comms(init_rpc=False)
+    @skip_if_lt_x_gpu(2)
+    @requires_nccl()
+    def test_load_rowwise_to_colwise_4(self) -> None:
+        path = self.get_file_path()
+        self.assertEqual(self.world_size, dist.get_world_size())
+
+        # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
+        src_spec = ChunkShardingSpec(
+            dim=0,
+            placements=[
+                "rank:0/cuda:0",
+                "rank:1/cuda:1",
+            ],
+        )
+
+        # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
+        dst_spec = ChunkShardingSpec(
+            dim=1,
+            placements=[
+                "rank:0/cuda:0",
+                "rank:1/cuda:1",
+            ],
+        )
+
+        if dist.get_rank() == 0:
+            shutil.rmtree(path, ignore_errors=True)
+            os.makedirs(path)
+        dist.barrier()
+
+        model_to_save = MyShardedModel3(src_spec)
+        model_to_save._register_state_dict_hook(state_dict_hook)
+        state_dict_to_save = model_to_save.state_dict()
+
+        fs_writer = FileSystemWriter(path=path)
+        save_state_dict(state_dict=state_dict_to_save, storage_writer=fs_writer)
+
+        dist.barrier()
+
+        model_to_load = MyShardedModel3(dst_spec)
+        model_to_load._register_state_dict_hook(state_dict_hook)
+        state_dict_to_load_to = model_to_load.state_dict()
+
+
+    @with_comms(init_rpc=False)
+    @skip_if_lt_x_gpu(2)
+    @requires_nccl()
+    def test_load_rowwise_to_colwise_5(self) -> None:
+        path = self.get_file_path()
+        self.assertEqual(self.world_size, dist.get_world_size())
+
+        # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
+        src_spec = ChunkShardingSpec(
+            dim=0,
+            placements=[
+                "rank:0/cuda:0",
+                "rank:1/cuda:1",
+            ],
+        )
+
+        # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
+        dst_spec = ChunkShardingSpec(
+            dim=1,
+            placements=[
+                "rank:0/cuda:0",
+                "rank:1/cuda:1",
+            ],
+        )
+
+        if dist.get_rank() == 0:
+            shutil.rmtree(path, ignore_errors=True)
+            os.makedirs(path)
+        dist.barrier()
+
+        model_to_save = MyShardedModel3(src_spec)
+        model_to_save._register_state_dict_hook(state_dict_hook)
+        state_dict_to_save = model_to_save.state_dict()
 
         fs_writer = FileSystemWriter(path=path)
         save_state_dict(state_dict=state_dict_to_save, storage_writer=fs_writer)
@@ -478,14 +692,6 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
         fs_reader = FileSystemReader(path=path)
 
         load_state_dict(state_dict=state_dict_to_load_to, storage_reader=fs_reader)
-
-        # We can't use torch.allclose since each ST has a different sharding spec
-        store_tensor = self.load_tensor(model_to_save.sharded_tensor)
-        dist.barrier()
-        load_tensor = self.load_tensor(model_to_load.sharded_tensor)
-
-        if dist.get_rank() == 0:
-            self.assertTrue(torch.allclose(store_tensor, load_tensor))
 
 if __name__ == "__main__":
     run_tests()
