@@ -415,6 +415,7 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
                 model_to_load = MyShardedModel3(s1)
                 model_to_load._register_state_dict_hook(state_dict_hook)
                 state_dict_to_load_to = model_to_load.state_dict()
+                dist.barrier()
 
                 fs_reader = FileSystemReader(path=path)
                 load_state_dict(
