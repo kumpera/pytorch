@@ -19,12 +19,9 @@ from .storage_writer import StorageWriter
 
 # -------------- private functions --------------
 def _compute_tensor_md(fqn: str, tensor: Tensor) -> TensorStorageMetadata:
-    tensor = tensor.detach()
-    storage_size = tensor.nelement() * tensor.element_size()
-
     return TensorStorageMetadata(
         storage_key=fqn,
-        length=storage_size,
+        size=tensor.size()
     )
 
 

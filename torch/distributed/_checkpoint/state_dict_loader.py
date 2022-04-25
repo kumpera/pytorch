@@ -37,15 +37,21 @@ def _reshard_and_prepare_read_request(
     for fqn, obj in state_dict.items():
         if isinstance(obj, torch.Tensor):
             tensor = obj.detach()
+            md = metadata_from_storage.state_dict_metadata[fqn]
+            if isinstance(md, TensorStorageMetadata):
+                rr = TensorReadRequest(
+                    tensor=tensor,
+                    storage_key=fqn,
+                    offsets=tuple([0] * len(tensor.size())),
+                    lengths=md.size,
+                )
 
-            rr = TensorReadRequest(
-                tensor=tensor,
-                storage_key=fqn,
-                offsets=tuple([0] * len(tensor.size())),
-                lengths=tensor.size(),
-            )
-
-            tensor_read_requests.append(rr)
+                tensor_read_requests.append(rr)
+            else:
+                raise ValueError(
+                    f"Invalid checkpoint metadata for {fqn}, " +
+                    "expected TensorStorageMetadata but found {type(md)}"
+                )
         elif isinstance(obj, ShardedTensor):
             md = metadata_from_storage.state_dict_metadata[fqn]
             if isinstance(md, ShardedTensorStorageMetadata):
@@ -213,11 +219,9 @@ def validate_metadata(
             if not isinstance(md, TensorStorageMetadata):
                 res.append(f"{fqn}: Expected TensorStorageMetadata but found: {type(md)}")
                 continue
-            md_len = md.length
-            tensor_len = obj.numel() * obj.element_size()
-            if md_len != tensor_len:
+            if md.size != obj.size():
                 res.append(
-                    f"{fqn}: Incompatible tensor size: expected {tensor_len} but found {md_len}"
+                    f"{fqn}: Incompatible tensor size: expected {obj.size()} but found {md.size}"
                 )
         elif isinstance(obj, ShardedTensor):
             if fqn not in metadata.state_dict_metadata:

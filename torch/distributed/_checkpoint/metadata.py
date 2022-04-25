@@ -35,9 +35,8 @@ class TensorStorageMetadata:
     # Unique indentifier for this tensor
     storage_key: str
 
-    # Lenght in bytes of this tensor
-    length: int
-
+    # Tensor sizes
+    size: Tuple[int, ...]
 
 @dataclass
 class Metadata:
