@@ -81,44 +81,42 @@ def load_state_dict(
     storage_reader: StorageReader,
 ) -> None:
     """
-    This public function defines the default behavior to load a state_dict
+    Load a distributed state_dict in SPMD style.
 
-    Sample Code
-    ```
-        my_model = MyModule()
-        optimizer = Adagrad(my_model.parameters())
-        ...
+    Each rank will try to read the least amount of data necessary
+    to fullfill the requested `state_dict`.
 
-        model_state_dict = my_model.state_dict()
-        optim_state_dict = optimizer.state_dict()
-        ...
+    When loading ShardedTensor instances, each rank only
+    reads data for their local shards.
 
-        # torch.distributed does not assume the the correctness of the state_dict
-        # the caller needs to ensure the correctness of the state_dict
-        optim_state_dict = some_function_to_cleanup_optim_state_dict(optim_state_dict)
-        ...
+    All tensors in ``state_dict`` must be allocated on their
+    destination device prior to calling this function.
 
-        fs_storage_loader = torch.distributed._checkpoint.FileSystemLoader("/checkpoint/1")
-        torch.distributed._checkpoint.load_state_dict(
-            state_dict=model_state_dict,
-            storage_reader=fs_stroage_loader,
-        )
-        torch.distributed._checkpoint.load_state_dict(
-            state_dict=optim_state_dict,
-            storage_reader=fs_stroage_loader,
-        )
+    All non-tensor data is loaded using `torch.load()`.
 
-        # module.load_state_dict() functon might have customized steps
-        # to flush the state_dict, must call them to
-        # ensure the correct behavior
-        my_model.load_state_dict(model_state_dict)
-        optim_state_dict.load_state_dict(optim_state_dict)
-        ...
-    ```
     Args:
-        state_dict (Dict[str, Any]) : A state_dict to load to. Note that this
+        state_dict (Dict[str, Any]) : The state_dict to load. Note that this
             state dict will updated in places.
-        storage_reader (StorageReader): An instance of storage loader.
+        storage_reader (StorageReader): StorageReader used to load data from.
+
+    Returns:
+        None.
+
+    Examples
+        >>> my_model = MyModule()
+        >>> optimizer = Adagrad(my_model.parameters())
+        >>> model_state_dict = my_model.state_dict()
+        >>> fs_storage_loader = torch.distributed._checkpoint.FileSystemLoader("/checkpoint/1")
+
+        >>> torch.distributed._checkpoint.load_state_dict(
+        >>>     state_dict=model_state_dict,
+        >>>     storage_reader=fs_storage_loader,
+        >>> )
+
+        >>> # module.load_state_dict() functon might have customized steps
+        >>> # to flush the state_dict, must call them to
+        >>> # ensure the correct behavior
+        >>> my_model.load_state_dict(model_state_dict)
     """
 
     metadata = storage_reader.read_metadata()
@@ -193,21 +191,24 @@ def validate_metadata(
     """
     Verify if it's possible to correctly load `state_dict` from `metadata`.
 
-    This method can be used to validate if a checkpoint is usable with a given model.
+    This method can be used to validate if a checkpoint is usable with a given model
+    state_dict without loading it.
 
-    Sample Code
-    ```
-        my_model: torch.nn.Model = ....
-        my_reader: torch.distributed._checkpoint.StorageReader = ...
-
-        res = torch.distributed._checkpoint.validate_metadata(my_model.state_dict(), my_reader.read_metadata())
-    ```
     Args:
         state_dict: A state_dict to verify if it's loadable.
         metadata: Checkpoint metadata to verify against.
 
     Returns:
         None if no issue was found or a List[str] of issues.
+
+    Example:
+        >>> my_model: torch.nn.Model = ....
+        >>> my_reader: torch.distributed._checkpoint.StorageReader = ...
+
+        >>> torch.distributed._checkpoint.validate_metadata(my_model.state_dict(), my_reader.read_metadata())
+        None
+    ```
+
     """
     res = []
     for fqn, obj in state_dict.items():

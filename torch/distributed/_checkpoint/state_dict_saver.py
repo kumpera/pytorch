@@ -100,41 +100,35 @@ def save_state_dict(
     storage_writer: StorageWriter,
 ) -> None:
     """
-    This public function defined the default behavior to save a state_dict
-    Notes
-    1. This is a WIP, the state_dict save with different versions of the code might not be compatible.
-    2. The caller needs to ensure the correctness of the state_dict
+    Save a distributed model in SPMD style.
 
-    Sample Code
-    ```
-        my_model = MyModule()
-        optimizer = Adagrad(my_model.parameters())
-        ...
+    This function is different from ``torch.save()`` as it handles
+    ``ShardedTensor`` by having each rank only save their local shards.
 
-        model_state_dict = my_model.state_dict()
-        optim_state_dict = optimizer.state_dict()
+    To produce a state_dict with ShardedTensor instances you must call
+    ``_register_state_dict_hook`` on the top module with value
+    `torch.distributed._shard.sharded_tensor.state_dict_hook` prior to
+    calling `state_dict()` on the top module.
 
-        ...
-        # torch.distributed does not assume the the correctness of the state_dict
-        # the caller needs to ensure the correctness of the state_dict
-        optim_state_dict = some_function_to_cleanup_optim_state_dict(optim_state_dict)
-        ...
-
-        fs_storage_writer = torch.distributed._checkpoint.FileSystemWriter("/checkpoint/1")
-        torch.distributed._checkpoint.save_state_dict(
-            state_dict=model_state_dict,
-            storage_writer=fs_stroage_writer,
-        )
-        torch.distributed._checkpoint.save_state_dict(
-            state_dict=optim_state_dict,
-            storage_writer=fs_stroage_writer,
-        )
-        ...
-    ```
+    There is no guarantees of Backwards Compatibility across PyTorch versions
+    for saved state_dicts.
 
     Args:
         state_dict (Dict[str, Any]) : A state_dict
-        storage_writer (StorageWriter): An instance of storage writer that performance the writes.
+        storage_writer (StorageWriter): Instance of StorageWrite use to perform writes.
+
+    Example:
+        >>> my_model = MyModule()
+        >>> # We must call this function prior to state_dict()
+        >>> my_model._register_state_dict_hook(state_dict_hook)
+
+        >>> model_state_dict = my_model.state_dict()
+
+        >>> fs_storage_writer = torch.distributed._checkpoint.FileSystemWriter("/checkpoint/1")
+        >>> torch.distributed._checkpoint.save_state_dict(
+        >>>     state_dict=model_state_dict,
+        >>>     storage_writer=fs_stroage_writer,
+        >>> )
     """
     (
         metadata,
