@@ -26,7 +26,7 @@ class StorageReader(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def read_tensors(self, requests: List[TensorReadRequest]) -> Future[None]:
+    def read_tensors(self, requests: List[TensorReadRequest], read_but_not_copy: bool) -> Future[None]:
         """
         Performs a read request and returns a Future to wait on.
         Args:
@@ -47,7 +47,7 @@ class FileSystemReader(StorageReader):
         super().__init__()
         self.path = path
 
-    def read_tensors(self, requests: List[TensorReadRequest]) -> Future[None]:
+    def read_tensors(self, requests: List[TensorReadRequest], read_but_not_copy: bool = False) -> Future[None]:
         """
         Very basic implementation that read from file system.
         """
@@ -75,7 +75,9 @@ class FileSystemReader(StorageReader):
                 view_to_copy.size() == req.tensor.size()
             ), f"The {req.storage_key} src/dst size does not match."
 
-            req.tensor.copy_(view_to_copy)
+
+            if not read_but_not_copy:
+                req.tensor.copy_(view_to_copy)
 
         fut: Future = Future()
         fut.set_result(None)

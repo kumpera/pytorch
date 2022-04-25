@@ -26,30 +26,36 @@ def _compute_tensor_md(fqn: str, tensor: Tensor) -> TensorStorageMetadata:
 
 
 def _prepare(
-    state_dict: Dict[str, Any], always_add_tensors: bool = False
+    state_dict: Dict[str, Any], include_non_replicated_tensors: bool = False
 ) -> Tuple[Metadata, Dict[str, int], List[BytesWriteRequest], List[TensorWriteRequest]]:
     """
-    Uses the state_dict to build three things.
+    Build a serialization plan for a given state_dict
+    By default, regular tensors are only included if execution from `rank 0`.
 
-    metadata: Metadata
-        The metatdata discribing the tensor / sharded tensor.
-        And it is storage meta data. See "../metadata.py" for detail
-
-    size_for_storage_keys: Dict[str, int]
-        Key is the storage key name, value is its size
-        It can used to pre allocate the storage for parallel and non sequential writes.
-
-    tensor_write_requests: List[TensorWriteRequest]
-        List of tensor write requests that should br perfromed by the writer.
-
-    bytes_write_requests: List[BytesWriteRequest]
-        List of byte write requests that should br perfromed by the writer.
-
-    Subclasses can optionally overwrite the implementation here,
-    if the default does not meet its requirement.
     Args:
-        state_dict: The state_dict to operate on
-        always_add_tensors: Include non-sharded tensors even if rank != 0
+        state_dict: The instance to plan for.
+        include_non_replicated_tensors: Include non-sharded tensors even if rank != 0
+
+    Returns:
+        A tuple with the following values:
+
+        metadata: Metadata
+        The storage metadata describing Tensor and ShardedTensors
+        instances found in `state_dict`. See `Metadata` for the schema.
+
+        size_for_storage_keys: Dict[str, int]
+            Key is the storage key name, value is the associated size
+            It can used to pre allocate the storage for parallel and non sequential writes.
+
+        bytes_write_requests: List[BytesWriteRequest]
+            List of ByteIO write requests that should be performed by the writer.
+
+        tensor_write_requests: List[TensorWriteRequest]
+            List of Tensor write requests that should be performed by the writer.
+
+    NB: `include_non_replicated_tensors=True` only makes sense for testing or validation.
+    Do not use it with load/save as it will lead to invalid checkpoints.
+
     """
     metadata = Metadata(state_dict_metadata={})
     tensor_write_requests: List[TensorWriteRequest] = []
@@ -61,7 +67,7 @@ def _prepare(
             # So we just need one from Rank 0.
             # If that's not the case, we will update later.
             if (
-                not always_add_tensors
+                not include_non_replicated_tensors
                 and dist.is_initialized()
                 and dist.get_rank() != 0
             ):

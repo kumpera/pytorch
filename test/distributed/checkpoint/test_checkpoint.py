@@ -71,8 +71,8 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
     def test_validate_metadata(self) -> None:
         module = TestModule()
 
-        # compute the default saved metadata (must pass always_add_tensors or we'll get incomplete MD)
-        metadata, _, _, _ = _prepare(module.state_dict(), always_add_tensors=True)
+        # compute the default saved metadata (must pass include_non_replicated_tensors or we'll get incomplete MD)
+        metadata, _, _, _ = _prepare(module.state_dict(), include_non_replicated_tensors=True)
         self.assertTrue(
             "regular" in metadata.state_dict_metadata,
             f"keys: {metadata.state_dict_metadata.keys()}",
@@ -115,8 +115,8 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
     @requires_nccl()
     def test_metadata_is_different_across_ranks(self) -> None:
         module = TestModule()
-        # compute the default saved metadata (must pass always_add_tensors or we'll get incomplete MD)
-        metadata, _, _, _ = _prepare(module.state_dict(), always_add_tensors=False)
+        # compute the default saved metadata (must pass include_non_replicated_tensors or we'll get incomplete MD)
+        metadata, _, _, _ = _prepare(module.state_dict(), include_non_replicated_tensors=False)
 
         # _prepare skips tensors when rank > 0
         if dist.get_rank() == 0:
@@ -132,8 +132,8 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
 
     def gen_metadata(self) -> Metadata:
         module = TestModule()
-        # compute the default saved metadata (must pass always_add_tensors or we'll get incomplete MD)
-        metadata, _, _, _ = _prepare(module.state_dict(), always_add_tensors=True)
+        # compute the default saved metadata (must pass include_non_replicated_tensors or we'll get incomplete MD)
+        metadata, _, _, _ = _prepare(module.state_dict(), include_non_replicated_tensors=True)
         return metadata
 
     @with_comms(init_rpc=False)

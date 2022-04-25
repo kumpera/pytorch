@@ -79,6 +79,8 @@ def _reshard_and_prepare_read_request(
 def load_state_dict(
     state_dict: Dict[str, Any],
     storage_reader: StorageReader,
+    dont_read_tensors: bool = False,
+    read_but_not_copy: bool = False,
 ) -> None:
     """
     Load a distributed state_dict in SPMD style.
@@ -124,7 +126,10 @@ def load_state_dict(
         state_dict=state_dict, metadata_from_storage=metadata
     )
     bytes_futures = storage_reader.read_bytes(bytes_read_requests)
-    tensor_futures = storage_reader.read_tensors(tensor_read_requests)
+
+    if not dont_read_tensors:
+        tensor_futures = storage_reader.read_tensors(tensor_read_requests, read_but_not_copy)
+
     bytes_futures.wait()
 
     # Addtional steps are required to convert the bytes to its original type
@@ -136,7 +141,8 @@ def load_state_dict(
         req.bytes.seek(0)
         state_dict[fqn] = torch.load(req.bytes)
 
-    tensor_futures.wait()
+    if not dont_read_tensors:
+        tensor_futures.wait()
 
 
 def _validate_sharded_tensor(
