@@ -16,7 +16,8 @@ from .metadata import (
     BytesReadRequest,
     TensorReadRequest,
     Metadata,
-    ExtendedTensorMetadata,
+    ShardedTensorStorageMetadata,
+    TensorStorageMetadata,
 )
 from .resharding import (
     prepare_sharded_tensor_read,
@@ -133,7 +134,7 @@ def load_state_dict(
 
 
 def _validate_sharded_tensor(
-    tensor_md: ShardedTensorMetadata, checkpoint_md: ExtendedTensorMetadata
+    tensor_md: ShardedTensorMetadata, checkpoint_md: ShardedTensorMetadata
 ) -> List[str]:
     # We assume the incoming tensor has being validated during construction
 
@@ -155,10 +156,6 @@ def _validate_sharded_tensor(
             assert shard_md_from_storage is not None
             # this is a naive quadratic algo that can later be optimized by
             #   sorting metadata and the shards md
-            # FIXME what does it mean for offset > 0?
-            assert (
-                storage_md.offset == 0
-            ), f"Cannot handle shard '{shard_md}': offset is non-zero"
 
             # do they overlap?
             if not _check_shard_metadata_pair_overlap(shard_md, shard_md_from_storage):
@@ -211,8 +208,11 @@ def validate_metadata(
                 res.append(f"{fqn}: Could not find Tensor metadata")
                 continue
             md = metadata.state_dict_metadata[fqn]
-            md_size = list(md.tensor_metadata.size)
-            tensor_size = list(obj.size())
+            if not isinstance(md, TensorStorageMetadata):
+                res.append(f"{fqn}: Expected TensorStorageMetadata but found: {type(md)}")
+                continue
+            md_size = md.length
+            tensor_size = obj.numel() * obj.element_size()
             if md_size != tensor_size:
                 res.append(
                     f"{fqn}: Incompatible tensor size: expected {tensor_size} but found {md_size}"
@@ -222,6 +222,9 @@ def validate_metadata(
                 res.append(f"{fqn}: Could not find ShardedTensor metadata")
                 continue
             md = metadata.state_dict_metadata[fqn]
+            if not isinstance(md, ShardedTensorStorageMetadata):
+                res.append(f"{fqn}: Expected ShardedTensorStorageMetadata but found: {type(md)}")
+                continue
             # Check if the overall ShardedTensor size is the same. Individual shards don't matter as we can reshard.
             md_size = list(md.tensor_metadata.size)
             tensor_size = list(obj.metadata().size)

@@ -14,53 +14,23 @@ from torch.distributed._shard.sharded_tensor import (
 from .metadata import (
     Metadata,
     BytesWriteRequest,
-    ExtendedTensorMetadata,
-    StorageMetadata,
+    TensorStorageMetadata,
+    ShardStorageMetadata,
+    ShardedTensorStorageMetadata,
+    TensorStorageMetadata,
     TensorWriteRequest,
 )
 from .resharding import prepare_sharded_tensor_write
 from .storage_writer import StorageWriter
 
 # -------------- private functions --------------
-def _compute_tensor_md(fqn: str, tensor: Tensor) -> ExtendedTensorMetadata:
-    # --- Step 3, populate the metadata ---
-    #
-    # Since torch.Tensor does not have a standard set of metadata we can operate on
-    # We wrap troch.Tensor's metadata with ShardMetadata
-    # This is frankly a bad idea, I will need to change this
+def _compute_tensor_md(fqn: str, tensor: Tensor) -> TensorStorageMetadata:
     tensor = tensor.detach()
-    tensor_size = list(tensor.size())
     storage_size = tensor.nelement() * tensor.element_size()
-    shard_metadata = ShardMetadata(
-        shard_offsets=[0] * len(tensor_size),
-        shard_sizes=tensor_size,
-        # Not sure how to deal with placement for regular tensor yet.
-        # Since they are only keep the copy on rank0, let's hard code it for now.
-        placement=f"rank:0/{str(tensor.device)}",
-    )
 
-    stm = ShardedTensorMetadata(
-        shards_metadata=[shard_metadata],
-        size=tensor.size(),
-        tensor_properties=TensorProperties(
-            dtype=tensor.dtype,
-            layout=tensor.layout,
-            requires_grad=tensor.requires_grad,
-            memory_format=torch.contiguous_format,
-            pin_memory=tensor.is_pinned(),
-        ),
-    )
-
-    return ExtendedTensorMetadata(
-        tensor_metadata=stm,
-        storage_metadata=[
-            StorageMetadata(
-                shard_metadata=shard_metadata,
-                storage_key=fqn,
-                length=storage_size,
-                offset=0,
-            )
-        ],
+    return TensorStorageMetadata(
+        storage_key= fqn,
+        length= storage_size,
     )
 
 

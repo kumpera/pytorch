@@ -182,5 +182,29 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
         module = TestModule()
         self.assertIsNotNone(validate_metadata(module.state_dict(), metadata))
 
+
+
+    @with_comms(init_rpc=False)
+    @skip_if_lt_x_gpu(2)
+    @requires_nccl()
+    def test_checkpoint_has_storage_type_mismatch(self) -> None:
+        module = TestModule()
+
+        metadata = self.gen_metadata()
+        regular = metadata.state_dict_metadata["regular"]
+        metadata.state_dict_metadata[".sharded"] = regular
+        res = validate_metadata(module.state_dict(), metadata)
+
+        self.assertIsNotNone(res)
+        self.assertTrue("Expected ShardedTensorStorageMetadata but found" in res[0], res[0])
+
+        metadata = self.gen_metadata()
+        sharded = metadata.state_dict_metadata[".sharded"]
+        metadata.state_dict_metadata["regular"] = sharded
+        res = validate_metadata(module.state_dict(), metadata)
+        self.assertTrue("Expected TensorStorageMetadata but found" in res[0], res[0])
+
+        self.assertIsNotNone(res)
+
 if __name__ == "__main__":
     run_tests()

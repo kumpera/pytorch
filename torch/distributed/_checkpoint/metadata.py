@@ -12,50 +12,38 @@ from torch.distributed._shard.sharded_tensor import (
 
 TENSOR_TYPE = Union[torch.Tensor, ShardedTensor]
 
-# Open issues/questions that will need to be addressed
-#
-# 0. Please note that this is not at all the final version,
-# everything is fluid and can be changed
-#
-# 1. We will need a metadata class for regular tensor, no point forcing it
-# into a ShardedTensorMetadata.
-#
-# 2. This code is using pickle for serialization, we need to replace the
-# serialization with something more reasonable e.g. flatbuffer before any
-# serious use case.
-#
-# 3. To get thing moving faster, I am using tensor as the "unit" for read/write
-# request. The ideal solution we have is to use a buffer instead. To make a
-# decision, we will need to fully understand the performance
-# implication for model store
-
-
 @dataclass
-class StorageMetadata:
-
-    shard_metadata: Optional[ShardMetadata]
-    # Unique identifier for this particular entity (Tensor or Shard of ShardedTensor)
+class ShardStorageMetadata:
+    shard_metadata: ShardMetadata
+    # Unique identifier for this particular Shard
     storage_key: str
+    # Length in bytes for this shard
     length: int
-    offset: int
 
 
 # Metadata for each param.
 @dataclass
-class ExtendedTensorMetadata:
-    # Details of Tensor/ShardedTensor (dtype, shape, sharding config etc.)
-    # TODO: It might not make sense to force Tensor's metadata into
-    # ShardedTensorMetadata, let's create a metadata class for regular tensor
+class ShardedTensorStorageMetadata:
+    # Metadata for the sharded tensor itself
     tensor_metadata: ShardedTensorMetadata
-    storage_metadata: List[StorageMetadata]
+    # Storage info for each Shard. There's no ordering requirement for this list.
+    storage_metadata: List[ShardStorageMetadata]
+
+
+@dataclass
+class TensorStorageMetadata:
+    # Unique indentifier for this tensor
+    storage_key: str
+
+    # Lenght in bytes of this tensor
+    length: int
 
 
 @dataclass
 class Metadata:
     # Metadata for the state dict.
-    # TODO, use pickle for this quick hack, must replace it with something
-    # else e.g. flatbuffer before serious use case,
-    state_dict_metadata: Dict[str, ExtendedTensorMetadata]
+    # This includes the MD for Tensors and ShardedTensors. ByteIO objects are skipped
+    state_dict_metadata: Dict[str, Union[ShardedTensorStorageMetadata, TensorStorageMetadata]]
 
     def __getstate__(self) -> bytes:
         serialized = pickle.dumps(self.state_dict_metadata)

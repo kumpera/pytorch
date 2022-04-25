@@ -1,4 +1,5 @@
 from typing import List, Tuple
+from torch.distributed._shard.sharded_tensor.metadata import ShardedTensorMetadata
 
 import torch
 from torch.distributed._shard.sharded_tensor import (
@@ -13,8 +14,8 @@ from torch.distributed._shard.sharding_spec._internals import (
 
 from .metadata import (
     TensorReadRequest,
-    ExtendedTensorMetadata,
-    StorageMetadata,
+    ShardStorageMetadata,
+    ShardedTensorStorageMetadata,
     TensorWriteRequest,
 )
 
@@ -62,7 +63,7 @@ def _shards_get_overlap_region_wrt_saved_tensor(
 
 def _compute_sharded_tensor_md(
     storage_key_prefix: str, tensor: ShardedTensor
-) -> ExtendedTensorMetadata:
+) -> ShardedTensor:
     smd = []
     for shard_md in tensor.metadata().shards_metadata:
         # each shard is in it own storage key.
@@ -79,15 +80,14 @@ def _compute_sharded_tensor_md(
         # not particularly great
         storage_size = shard_size * tensor.local_shards()[0].tensor.element_size()
 
-        one_smd = StorageMetadata(
+        one_smd = ShardStorageMetadata(
             shard_metadata=shard_md,
             storage_key=storage_key,
             length=storage_size,
-            offset=0,
         )
         smd.append(one_smd)
 
-    return ExtendedTensorMetadata(
+    return ShardedTensorStorageMetadata(
         tensor_metadata=tensor.metadata(),
         storage_metadata=smd,
     )
@@ -96,7 +96,7 @@ def _compute_sharded_tensor_md(
 def prepare_sharded_tensor_write(
     sharded_tensor: ShardedTensor,
     storage_key_prefix: str,
-) -> Tuple[List[TensorWriteRequest], ExtendedTensorMetadata]:
+) -> Tuple[List[TensorWriteRequest], ShardedTensorMetadata]:
     """
     Prepare sharded tensor write.
 
@@ -130,7 +130,7 @@ def prepare_sharded_tensor_write(
 
 
 def prepare_sharded_tensor_read(
-    metadata: ExtendedTensorMetadata, sharded_tensor_out: ShardedTensor
+    metadata: ShardedTensorMetadata, sharded_tensor_out: ShardedTensor
 ) -> List[TensorReadRequest]:
     """
     Prepare sharded tensor read.
@@ -153,11 +153,6 @@ def prepare_sharded_tensor_read(
             tensor = shard.tensor.detach()
             assert shard_md_from_storage is not None
             # this is a naive quadratic algo that can later be optimized
-            #   by sorting metadata and the shards md
-            # FIXME how do we handle offset > 0?
-            assert (
-                storage_md.offset == 0
-            ), f"Cannot handle shard '{storage_md}': offset is non-zero"
 
             # do they overlap?
             if not _check_shard_metadata_pair_overlap(
