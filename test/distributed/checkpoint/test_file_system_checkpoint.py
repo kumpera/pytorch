@@ -437,11 +437,8 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
     @skip_if_lt_x_gpu(2)
     @requires_nccl()
     def test_load_rowwise_to_colwise(self) -> None:
-        print(f"{dist.get_rank()}---1")
         path = self.get_file_path()
         self.assertEqual(self.world_size, dist.get_world_size())
-        print(f"{dist.get_rank()}---2")
-
 
         # pyre-fixme [28]: Unexpected keyword argument `dim` to call `dist._sharding_spec.api.ChunkShardingSpec.__init__`.
         src_spec = ChunkShardingSpec(
@@ -465,14 +462,14 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
             shutil.rmtree(path, ignore_errors=True)
             os.makedirs(path)
 
-        model_to_save = MyShardedModel3(src_spec)
+        model_to_save = MyShardedModel3(src_spec).cuda(dist.get_rank())
         model_to_save._register_state_dict_hook(state_dict_hook)
         state_dict_to_save = model_to_save.state_dict()
 
         fs_writer = FileSystemWriter(path=path)
         save_state_dict(state_dict=state_dict_to_save, storage_writer=fs_writer)
 
-        model_to_load = MyShardedModel3(dst_spec)
+        model_to_load = MyShardedModel3(dst_spec).cuda(dist.get_rank())
         model_to_load._register_state_dict_hook(state_dict_hook)
         state_dict_to_load_to = model_to_load.state_dict()
 
@@ -481,15 +478,11 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
         load_state_dict(state_dict=state_dict_to_load_to, storage_reader=fs_reader)
 
         # We can't use torch.allclose since each ST has a different sharding spec
-        print(f"{dist.get_rank()}---before first gather")
-
         store_tensor = self.load_tensor(model_to_save.sharded_tensor)
-        print(f"{dist.get_rank()}---before second gather")
         load_tensor = self.load_tensor(model_to_load.sharded_tensor)
 
         if dist.get_rank() == 0:
             self.assertTrue(torch.allclose(store_tensor, load_tensor))
-        print(f"{dist.get_rank()}---done")
 
 
 if __name__ == "__main__":

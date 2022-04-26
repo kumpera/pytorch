@@ -26,7 +26,7 @@ class StorageReader(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def read_tensors(self, requests: List[TensorReadRequest], read_but_not_copy: bool) -> Future[None]:
+    def read_tensors(self, requests: List[TensorReadRequest]) -> Future[None]:
         """
         Performs a read request and returns a Future to wait on.
         Args:
@@ -47,7 +47,7 @@ class FileSystemReader(StorageReader):
         super().__init__()
         self.path = path
 
-    def read_tensors(self, requests: List[TensorReadRequest], read_but_not_copy: bool = False) -> Future[None]:
+    def read_tensors(self, requests: List[TensorReadRequest]) -> Future[None]:
         """
         Very basic implementation that read from file system.
         """
@@ -58,9 +58,11 @@ class FileSystemReader(StorageReader):
         view_cached: Optional[Tensor] = None
 
         for req in requests:
-            if cached_storage_key != req.storage_key:
+            if cached_storage_key != req.storage_key or \
+                    (view_cached is not None and view_cached.device != req.tensor.device):
+
                 with open(os.path.join(self.path, req.storage_key), "rb") as storage:
-                    view_cached = cast(Tensor, torch.load(storage))
+                    view_cached = cast(Tensor, torch.load(storage, map_location=req.tensor.device))
                     cached_storage_key = req.storage_key
 
             view_to_copy: Tensor = cast(Tensor, view_cached)
@@ -76,8 +78,11 @@ class FileSystemReader(StorageReader):
             ), f"The {req.storage_key} src/dst size does not match."
 
 
-            if not read_but_not_copy:
-                req.tensor.copy_(view_to_copy)
+            assert (
+                view_to_copy.device == req.tensor.device
+            ), f"cannot load across devices {view_to_copy.device} vs {req.tensor.device}"
+
+            req.tensor.copy_(view_to_copy)
 
         fut: Future = Future()
         fut.set_result(None)
