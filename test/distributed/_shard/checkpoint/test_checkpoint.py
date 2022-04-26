@@ -79,36 +79,28 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
         )
 
         module = TestModule()
-        self.assertIsNone(validate_metadata(module.state_dict(), metadata))
+        validate_metadata(module.state_dict(), metadata)
 
         module = TestModule()
         module.extra_param = torch.nn.Parameter(torch.zeros(2, 2))
-        res = validate_metadata(module.state_dict(), metadata)
-        self.assertIsNotNone(res)
-        self.assertTrue("Could not find Tensor metadata" in res[0])
-        self.assertTrue("extra_param" in res[0])
+        with self.assertRaisesRegex(ValueError, "Could not find Tensor metadata"):
+            validate_metadata(module.state_dict(), metadata)
 
         module = TestModule()
         module.regular = torch.nn.Parameter(torch.zeros(2, 4))
 
-        res = validate_metadata(module.state_dict(), metadata)
-        self.assertIsNotNone(res)
-        self.assertTrue("Incompatible tensor size" in res[0])
-        self.assertTrue("regular" in res[0])
+        with self.assertRaisesRegex(ValueError, "Incompatible tensor size"):
+            validate_metadata(module.state_dict(), metadata)
 
         module = TestModule()
         module.extra_sharded = sharded_tensor.zeros(module.spec(), 4, 2)
-        res = validate_metadata(module.state_dict(), metadata)
-        self.assertIsNotNone(res)
-        self.assertTrue("Could not find ShardedTensor metadata" in res[0])
-        self.assertTrue("extra_sharded" in res[0])
+        with self.assertRaisesRegex(ValueError, "Could not find ShardedTensor metadata"):
+            validate_metadata(module.state_dict(), metadata)
 
         module = TestModule()
         module.sharded = sharded_tensor.zeros(module.spec(), 4, 2)
-        res = validate_metadata(module.state_dict(), metadata)
-        self.assertIsNotNone(res)
-        self.assertTrue("Incompatible ShardedTensor size" in res[0])
-        self.assertTrue("sharded" in res[0])
+        with self.assertRaisesRegex(ValueError, "Incompatible ShardedTensor size"):
+            validate_metadata(module.state_dict(), metadata)
 
     @with_comms(init_rpc=False)
     @skip_if_lt_x_gpu(2)
@@ -157,7 +149,8 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
             sizes[i] = 1
 
         module = TestModule()
-        self.assertIsNotNone(validate_metadata(module.state_dict(), metadata))
+        with self.assertRaisesRegex(ValueError, "only has 1 available"):
+            validate_metadata(module.state_dict(), metadata)
 
     @with_comms(init_rpc=False)
     @skip_if_lt_x_gpu(2)
@@ -180,7 +173,8 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
             sizes[i] += 1
 
         module = TestModule()
-        self.assertIsNotNone(validate_metadata(module.state_dict(), metadata))
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            validate_metadata(module.state_dict(), metadata)
 
 
 
@@ -193,18 +187,14 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
         metadata = self.gen_metadata()
         regular = metadata.state_dict_metadata["regular"]
         metadata.state_dict_metadata[".sharded"] = regular
-        res = validate_metadata(module.state_dict(), metadata)
-
-        self.assertIsNotNone(res)
-        self.assertTrue("Expected ShardedTensorStorageMetadata but found" in res[0], res[0])
+        with self.assertRaisesRegex(ValueError, "ShardedTensorStorageMetadata but found"):
+            validate_metadata(module.state_dict(), metadata)
 
         metadata = self.gen_metadata()
         sharded = metadata.state_dict_metadata[".sharded"]
         metadata.state_dict_metadata["regular"] = sharded
-        res = validate_metadata(module.state_dict(), metadata)
-        self.assertTrue("Expected TensorStorageMetadata but found" in res[0], res[0])
-
-        self.assertIsNotNone(res)
+        with self.assertRaisesRegex(ValueError, "TensorStorageMetadata but found"):
+            validate_metadata(module.state_dict(), metadata)
 
 if __name__ == "__main__":
     run_tests()

@@ -146,26 +146,17 @@ def _validate_sharded_tensor(
 ) -> List[str]:
     # We assume the incoming tensor has being validated during construction
 
-    res = []
     # To ensure a checkpoint can satisfy loading a ST, we compute the loading
     # plans for all shards and see if they are doable.
-    try:
-        # this API returns a list of issues
-        validate_non_overlapping_shards_metadata(
-            checkpoint_md.tensor_metadata.shards_metadata
-        )
-    except ValueError as e:
-        res.append(str(e))
+    validate_non_overlapping_shards_metadata(
+        checkpoint_md.tensor_metadata.shards_metadata
+    )
 
     for shard_md in tensor_md.shards_metadata:
         read_volume = 0
         for storage_md in checkpoint_md.storage_metadata:
             shard_md_from_storage = storage_md.shard_metadata
-            assert shard_md_from_storage is not None
-            # this is a naive quadratic algo that can later be optimized by
-            #   sorting metadata and the shards md
 
-            # do they overlap?
             if not _check_shard_metadata_pair_overlap(shard_md, shard_md_from_storage):
                 continue
 
@@ -180,12 +171,10 @@ def _validate_sharded_tensor(
         for size in shard_md.shard_sizes:
             shard_volume *= size
         if read_volume != shard_volume:
-            res.append(
+            raise ValueError(
                 f"Shard {shard_md} only has {read_volume} available" +
                 "elements but needs {shard_volume}"
             )
-    return res
-
 
 def validate_metadata(
     state_dict: Dict[str, Any], metadata: Metadata
@@ -193,15 +182,16 @@ def validate_metadata(
     """
     Verify if it's possible to correctly load `state_dict` from `metadata`.
 
-    This method can be used to validate if a checkpoint is usable with a given model
-    state_dict without loading it.
+    This method validate if a checkpoint is usable with a given model
+    state_dict without loading it. It will raise ValueError if it finds
+    anything problematic.
 
     Args:
         state_dict: A state_dict to verify if it's loadable.
         metadata: Checkpoint metadata to verify against.
 
     Returns:
-        None if no issue was found or a List[str] of issues.
+        None
 
     Example:
         >>> my_model: torch.nn.Model = ....
@@ -212,35 +202,34 @@ def validate_metadata(
     ```
 
     """
-    res = []
     for fqn, obj in state_dict.items():
         if isinstance(obj, torch.Tensor):
             if fqn not in metadata.state_dict_metadata:
-                res.append(f"{fqn}: Could not find Tensor metadata")
-                continue
+                raise ValueError(f"{fqn}: Could not find Tensor metadata")
+
             md = metadata.state_dict_metadata[fqn]
             if not isinstance(md, TensorStorageMetadata):
-                res.append(f"{fqn}: Expected TensorStorageMetadata but found: {type(md)}")
-                continue
+                raise ValueError(f"{fqn}: Expected TensorStorageMetadata but found: {type(md)}")
+
             if md.size != obj.size():
-                res.append(
+                raise ValueError(
                     f"{fqn}: Incompatible tensor size: expected {obj.size()} but found {md.size}"
                 )
+
         elif isinstance(obj, ShardedTensor):
             if fqn not in metadata.state_dict_metadata:
-                res.append(f"{fqn}: Could not find ShardedTensor metadata")
-                continue
+                raise ValueError(f"{fqn}: Could not find ShardedTensor metadata")
+
             md = metadata.state_dict_metadata[fqn]
             if not isinstance(md, ShardedTensorStorageMetadata):
-                res.append(f"{fqn}: Expected ShardedTensorStorageMetadata but found: {type(md)}")
-                continue
+                raise ValueError(f"{fqn}: Expected ShardedTensorStorageMetadata but found: {type(md)}")
+
             # Check if the overall ShardedTensor size is the same. Individual shards don't matter as we can reshard.
             md_size = list(md.tensor_metadata.size)
             tensor_size = list(obj.metadata().size)
             if md_size != tensor_size:
-                res.append(
+                raise ValueError(
                     f"{fqn}: Incompatible ShardedTensor size: expectected {tensor_size} but found {md_size}"
                 )
-            res += _validate_sharded_tensor(obj.metadata(), md)
 
-    return res if len(res) > 0 else None
+            _validate_sharded_tensor(obj.metadata(), md)
