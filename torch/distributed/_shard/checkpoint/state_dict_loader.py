@@ -1,6 +1,6 @@
 
 import io
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
 from torch.distributed._shard.sharded_tensor import (
@@ -23,7 +23,7 @@ from .resharding import (
     _prepare_sharded_tensor_read,
     _shards_get_overlap_region_wrt_saved_tensor
 )
-from .storage_reader import StorageReader
+from .storage import StorageReader
 
 
 def _reshard_and_prepare_read_request(
@@ -143,7 +143,7 @@ def load_state_dict(
 
 def _validate_sharded_tensor(
     tensor_md: ShardedTensorMetadata, checkpoint_md: ShardedTensorStorageMetadata
-) -> List[str]:
+) -> None:
     # We assume the incoming tensor has being validated during construction
 
     # To ensure a checkpoint can satisfy loading a ST, we compute the loading
@@ -178,7 +178,7 @@ def _validate_sharded_tensor(
 
 def validate_metadata(
     state_dict: Dict[str, Any], metadata: Metadata
-) -> Optional[List[str]]:
+) -> None:
     """
     Verify if it's possible to correctly load `state_dict` from `metadata`.
 

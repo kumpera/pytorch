@@ -10,5 +10,5 @@ from .metadata import (
 )
 from .state_dict_loader import load_state_dict
 from .state_dict_saver import save_state_dict
-from .storage_reader import FileSystemReader, StorageReader
-from .storage_writer import FileSystemWriter, StorageWriter
+from .storage import StorageReader, StorageWriter
+from .filesystem import FileSystemReader, FileSystemWriter

@@ -1,46 +1,70 @@
-import abc
-import operator
+import io
 import os
+import operator
 import pickle
 from typing import List, Optional, cast
 
 import torch
 from torch import Tensor
+import torch.distributed as dist
 from torch.futures import Future
 
-from .metadata import BytesReadRequest, Metadata, TensorReadRequest
+from .metadata import (
+    BytesReadRequest,
+    BytesWriteRequest,
+    Metadata,
+    TensorReadRequest,
+    TensorWriteRequest,
+)
+from .storage import StorageReader, StorageWriter
 
+class FileSystemWriter(StorageWriter):
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self.path = path
+        os.makedirs(self.path, exist_ok=True)
 
-class StorageReader(abc.ABC):
-    """
-    Interface to read from the underlying storage system.
-    """
+    def write_bytes(self, requests: List[BytesWriteRequest]) -> Future[None]:
+        for req in requests:
+            with open(os.path.join(self.path, req.storage_key), "wb") as storage:
+                storage.write(req.bytes.getbuffer())
 
-    @abc.abstractmethod
-    def read_bytes(self, requests: List[BytesReadRequest]) -> Future[None]:
-        """
-        Read request and returns a Future to wait on.
-        Args:
-            requests (List[BytesReadRequest]): see `./metadata.py`]
-        """
-        pass
+        fut: Future[None] = Future()
+        fut.set_result(None)
+        return fut
 
-    @abc.abstractmethod
-    def read_tensors(self, requests: List[TensorReadRequest]) -> Future[None]:
-        """
-        Performs a read request and returns a Future to wait on.
-        Args:
-            requests (List[BytesReadRequest]): see `./metadata.py`
-        """
-        pass
+    def write_tensors(self, requests: List[TensorWriteRequest]) -> Future[None]:
+        for req in requests:
+            with open(os.path.join(self.path, req.storage_key), "wb") as storage:
+                # The following couple lines are simple implementation to get
+                # things going.
+                #
+                # At load time, to enable resharding, we use (sub)view of the tensor.
+                # Since the storage of the tensor might not be contiguous. we need to
+                # preseve the original view, to calculate the correct sub view at load.
+                #
+                # `torch.save` saves both the view and storage, it is a good option
+                # for unblocking. There are two drawbacks:
+                # 1. `torch.save` is pickle based, and pickle is not known for its
+                #   compatibility, we should consider replacing it with a more
+                #   stable option.
+                # 2. pickle is not streamable.
+                buffer = io.BytesIO()
+                torch.save(req.tensor, buffer)
+                storage.write(buffer.getbuffer())
 
-    @abc.abstractmethod
-    def read_metadata(self) -> Metadata:
-        """
-        Read the meta data and returns.
-        """
-        pass
+        fut: Future[None] = Future()
+        fut.set_result(None)
+        return fut
 
+    # Implementating the abstract function in Storage Writer
+    def write_metadata(self, metadata: Metadata) -> None:
+        # Once write metadata once as each Metadata has the global view
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+
+        with open(os.path.join(self.path, ".metadata"), "wb") as metadata_file:
+            pickle.dump(metadata, metadata_file)
 
 class FileSystemReader(StorageReader):
     def __init__(self, path: str) -> None:

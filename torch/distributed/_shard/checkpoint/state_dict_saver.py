@@ -15,7 +15,7 @@ from .metadata import (
     TensorWriteRequest,
 )
 from .resharding import _prepare_sharded_tensor_write
-from .storage_writer import StorageWriter
+from .storage import StorageWriter
 
 # -------------- private functions --------------
 def _compute_tensor_md(fqn: str, tensor: Tensor) -> TensorStorageMetadata:
