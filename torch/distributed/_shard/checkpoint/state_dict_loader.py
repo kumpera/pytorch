@@ -35,7 +35,16 @@ def _reshard_and_prepare_read_request(
     tensor_read_requests = []
     bytes_read_requests = []
     for fqn, obj in state_dict.items():
-        if isinstance(obj, torch.Tensor):
+        if isinstance(obj, ShardedTensor):
+            md = metadata_from_storage.state_dict_metadata[fqn]
+            if isinstance(md, ShardedTensorStorageMetadata):
+                tensor_read_requests += _prepare_sharded_tensor_read(md, obj)
+            else:
+                raise ValueError(
+                    f"Invalid checkpoint metadata for {fqn}, " +
+                    "expected ShardedTensorStorageMetadata but found {type(md)}"
+                )
+        elif isinstance(obj, torch.Tensor):
             tensor = obj.detach()
             md = metadata_from_storage.state_dict_metadata[fqn]
             if isinstance(md, TensorStorageMetadata):
@@ -51,15 +60,6 @@ def _reshard_and_prepare_read_request(
                 raise ValueError(
                     f"Invalid checkpoint metadata for {fqn}, " +
                     "expected TensorStorageMetadata but found {type(md)}"
-                )
-        elif isinstance(obj, ShardedTensor):
-            md = metadata_from_storage.state_dict_metadata[fqn]
-            if isinstance(md, ShardedTensorStorageMetadata):
-                tensor_read_requests += _prepare_sharded_tensor_read(md, obj)
-            else:
-                raise ValueError(
-                    f"Invalid checkpoint metadata for {fqn}, " +
-                    "expected ShardedTensorStorageMetadata but found {type(md)}"
                 )
         else:
             # This is actually hard to handle correctly
@@ -203,20 +203,7 @@ def validate_metadata(
 
     """
     for fqn, obj in state_dict.items():
-        if isinstance(obj, torch.Tensor):
-            if fqn not in metadata.state_dict_metadata:
-                raise ValueError(f"{fqn}: Could not find Tensor metadata")
-
-            md = metadata.state_dict_metadata[fqn]
-            if not isinstance(md, TensorStorageMetadata):
-                raise ValueError(f"{fqn}: Expected TensorStorageMetadata but found: {type(md)}")
-
-            if md.size != obj.size():
-                raise ValueError(
-                    f"{fqn}: Incompatible tensor size: expected {obj.size()} but found {md.size}"
-                )
-
-        elif isinstance(obj, ShardedTensor):
+        if isinstance(obj, ShardedTensor):
             if fqn not in metadata.state_dict_metadata:
                 raise ValueError(f"{fqn}: Could not find ShardedTensor metadata")
 
@@ -233,3 +220,15 @@ def validate_metadata(
                 )
 
             _validate_sharded_tensor(obj.metadata(), md)
+        elif isinstance(obj, torch.Tensor):
+            if fqn not in metadata.state_dict_metadata:
+                raise ValueError(f"{fqn}: Could not find Tensor metadata")
+
+            md = metadata.state_dict_metadata[fqn]
+            if not isinstance(md, TensorStorageMetadata):
+                raise ValueError(f"{fqn}: Expected TensorStorageMetadata but found: {type(md)}")
+
+            if md.size != obj.size():
+                raise ValueError(
+                    f"{fqn}: Incompatible tensor size: expected {obj.size()} but found {md.size}"
+                )

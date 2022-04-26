@@ -62,7 +62,11 @@ def _prepare(
     bytes_write_requests: List[BytesWriteRequest] = []
 
     for fqn, obj in state_dict.items():
-        if isinstance(obj, Tensor):
+        if isinstance(obj, ShardedTensor):
+            write_reqs, md = _prepare_sharded_tensor_write(obj, fqn)
+            tensor_write_requests += write_reqs
+            metadata.state_dict_metadata[fqn] = md
+        elif isinstance(obj, Tensor):
             # The assumption is that non ShardedTensors are full replicated across all ranks
             # So we just need one from Rank 0.
             # If that's not the case, we will update later.
@@ -80,10 +84,6 @@ def _prepare(
                     )
                 )
                 metadata.state_dict_metadata[fqn] = _compute_tensor_md(fqn, obj)
-        elif isinstance(obj, ShardedTensor):
-            write_reqs, md = _prepare_sharded_tensor_write(obj, fqn)
-            tensor_write_requests += write_reqs
-            metadata.state_dict_metadata[fqn] = md
         else:
             bytes_io = io.BytesIO()
             torch.save(obj, bytes_io)
