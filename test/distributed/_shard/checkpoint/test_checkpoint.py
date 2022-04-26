@@ -7,9 +7,9 @@ import torch
 import torch.distributed as dist
 import torch.nn
 
-from torch.distributed._checkpoint.state_dict_loader import validate_metadata
-from torch.distributed._checkpoint.state_dict_saver import _prepare
-from torch.distributed._checkpoint.metadata import Metadata
+from torch.distributed._shard.checkpoint.state_dict_loader import validate_metadata
+from torch.distributed._shard.checkpoint.state_dict_saver import _prepare
+from torch.distributed._shard.checkpoint.metadata import Metadata
 
 from torch.distributed._shard import sharded_tensor
 from torch.distributed._shard.sharded_tensor import (

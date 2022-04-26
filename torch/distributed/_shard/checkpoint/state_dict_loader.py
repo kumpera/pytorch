@@ -106,9 +106,9 @@ def load_state_dict(
         >>> my_model = MyModule()
         >>> optimizer = Adagrad(my_model.parameters())
         >>> model_state_dict = my_model.state_dict()
-        >>> fs_storage_loader = torch.distributed._checkpoint.FileSystemLoader("/checkpoint/1")
+        >>> fs_storage_loader = torch.distributed._shard.checkpoint.FileSystemLoader("/checkpoint/1")
 
-        >>> torch.distributed._checkpoint.load_state_dict(
+        >>> torch.distributed._shard.checkpoint.load_state_dict(
         >>>     state_dict=model_state_dict,
         >>>     storage_reader=fs_storage_loader,
         >>> )
@@ -205,9 +205,9 @@ def validate_metadata(
 
     Example:
         >>> my_model: torch.nn.Model = ....
-        >>> my_reader: torch.distributed._checkpoint.StorageReader = ...
+        >>> my_reader: torch.distributed._shard.checkpoint.StorageReader = ...
 
-        >>> torch.distributed._checkpoint.validate_metadata(my_model.state_dict(), my_reader.read_metadata())
+        >>> torch.distributed._shard.checkpoint.validate_metadata(my_model.state_dict(), my_reader.read_metadata())
         None
     ```
 
