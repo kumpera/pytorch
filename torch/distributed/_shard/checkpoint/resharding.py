@@ -18,6 +18,8 @@ from .metadata import (
     TensorWriteRequest,
 )
 
+# This constant is used as the separator character between tensor name and shard name
+STORAGE_KEY_SEPARATOR = "$"
 
 def _shards_get_overlap_region_wrt_saved_tensor(
     saved_shard: ShardMetadata, current_shard: ShardMetadata
@@ -65,17 +67,19 @@ def _shards_get_overlap_region_wrt_saved_tensor(
     return narrows
 
 
+def _get_shard_storage_key(
+    tensor_storage_key: str,
+    shard: ShardMetadata
+) -> str:
+    shard_key = "_".join([str(i) for i in shard.shard_offsets])
+    return f"{tensor_storage_key}{STORAGE_KEY_SEPARATOR}{shard_key}"
+
 def _compute_sharded_tensor_md(
-    storage_key_prefix: str, tensor: ShardedTensor
+    storage_key: str, tensor: ShardedTensor
 ) -> ShardedTensorStorageMetadata:
     smd = []
     for shard_md in tensor.metadata().shards_metadata:
-        # each shard is in it own storage key.
-        # Most network file system is optimized with single write, multiple read
-        # Unless we can group tensors locally into one big chunk
-        # It might be best to write each shard as one key
-        suffix = "_".join([str(i) for i in shard_md.shard_offsets])
-        storage_key = f"{storage_key_prefix}_{suffix}"
+        shard_storage_key = _get_shard_storage_key(storage_key, shard_md)
 
         shard_size = 1
         for d in shard_md.shard_sizes:
@@ -86,7 +90,7 @@ def _compute_sharded_tensor_md(
 
         one_smd = ShardStorageMetadata(
             shard_metadata=shard_md,
-            storage_key=storage_key,
+            storage_key=shard_storage_key,
             length=storage_size,
         )
         smd.append(one_smd)
@@ -99,37 +103,35 @@ def _compute_sharded_tensor_md(
 
 def _prepare_sharded_tensor_write(
     sharded_tensor: ShardedTensor,
-    storage_key_prefix: str,
+    storage_key: str,
 ) -> Tuple[List[TensorWriteRequest], ShardedTensorStorageMetadata]:
     """
     Prepare sharded tensor write.
 
     Args:
         sharded_tensor: The sharded tensor to persist.
-        storage_key_prefix: The identifier to be prepended to storage keys
-                            associated with the sharded tensor.
+        storage_key: The identifier for `sharded_tensor`.
 
     Returns:
         Write requests for persisting the sharded tensor, and metadata
         describing the persisted sharded tensor.
+
+    NB `storage_key` is used to compose the key names of the local shards.
+
     """
     write_requests = []
     for shard in sharded_tensor.local_shards():
-        # each shard has its own storage key.
-        # For most cases, the read is a recovery from a failure to the same sharding
-        # and does not need any resharding, write each shard as is is the most effective
-        suffix = "_".join([str(i) for i in shard.metadata.shard_offsets])
-        storage_key = f"{storage_key_prefix}_{suffix}"
-
         tensor = shard.tensor.detach()
+        shard_storage_key = _get_shard_storage_key(storage_key, shard.metadata)
+
 
         wr = TensorWriteRequest(
             tensor=tensor,
-            storage_key=storage_key,
+            storage_key=shard_storage_key,
         )
         write_requests.append(wr)
     return write_requests, _compute_sharded_tensor_md(
-        storage_key_prefix, sharded_tensor
+        storage_key, sharded_tensor
     )
 
 
