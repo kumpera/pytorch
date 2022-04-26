@@ -368,7 +368,7 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
                     ShardMetadata(
                         shard_offsets=[6, 0],
                         shard_sizes=[3, 20],
-                        placement="rank:1/cuda:0",
+                        placement="rank:1/cuda:1",
                     ),
                     ShardMetadata(
                         shard_offsets=[9, 0],
