@@ -74,6 +74,16 @@ def _get_shard_storage_key(
     shard_key = "_".join([str(i) for i in shard.shard_offsets])
     return f"{tensor_storage_key}{STORAGE_KEY_SEPARATOR}{shard_key}"
 
+
+def _get_sharded_tensor_element_size(tensor: ShardedTensor) -> int:
+    if len(tensor.local_shards()) > 0:
+        test_tensor = tensor.local_shards()[0].tensor
+    else:
+        dtype = tensor.metadata().tensor_properties.dtype
+        test_tensor = torch.empty((1,), dtype=dtype)
+
+    return test_tensor.element_size()
+
 def _compute_sharded_tensor_md(
     storage_key: str, tensor: ShardedTensor
 ) -> ShardedTensorStorageMetadata:
@@ -86,7 +96,7 @@ def _compute_sharded_tensor_md(
             shard_size *= d
 
         # not particularly great
-        storage_size = shard_size * tensor.local_shards()[0].tensor.element_size()
+        storage_size = shard_size * _get_sharded_tensor_element_size(tensor)
 
         one_smd = ShardStorageMetadata(
             shard_metadata=shard_md,

@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 import torch.nn
 
+from torch.distributed._shard.checkpoint.resharding import _prepare_sharded_tensor_write
 from torch.distributed._shard.checkpoint.state_dict_loader import validate_metadata
 from torch.distributed._shard.checkpoint.state_dict_saver import _prepare
 from torch.distributed._shard.checkpoint.metadata import Metadata
@@ -177,7 +178,6 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
             validate_metadata(module.state_dict(), metadata)
 
 
-
     @with_comms(init_rpc=False)
     @skip_if_lt_x_gpu(2)
     @requires_nccl()
@@ -195,6 +195,27 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
         metadata.state_dict_metadata["regular"] = sharded
         with self.assertRaisesRegex(ValueError, "TensorStorageMetadata but found"):
             validate_metadata(module.state_dict(), metadata)
+
+
+    @with_comms(init_rpc=False)
+    @skip_if_lt_x_gpu(2)
+    @requires_nccl()
+    def test_tensor_metadata_with_missing_rank_spec(self) -> None:
+        spec = ChunkShardingSpec(
+            dim=0,
+            placements=[
+                "rank:1/cuda:1",
+            ],
+        )
+
+        st = sharded_tensor.zeros(spec, 4, 4, dtype=torch.float64)
+
+        (_, md) = _prepare_sharded_tensor_write(st, "tensor")
+
+        self.assertEqual(1, len(md.storage_metadata))
+        self.assertEqual(4 * 4 * 8, md.storage_metadata[0].length)
+
+
 
 if __name__ == "__main__":
     run_tests()
