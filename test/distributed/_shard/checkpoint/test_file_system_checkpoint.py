@@ -484,6 +484,23 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
         if dist.get_rank() == 0:
             self.assertTrue(torch.allclose(store_tensor, load_tensor))
 
+    @with_comms(init_rpc=False)
+    @skip_if_lt_x_gpu(2)
+    @requires_nccl()
+    def test_cannot_save_key_with_metadata_name(self) -> None:
+        path = self.get_file_path()
+
+        if dist.get_rank() == 0:
+            shutil.rmtree(path, ignore_errors=True)
+            os.makedirs(path)
+
+        state_dict_to_save = {
+            ".metadata": "hello"
+        }
+
+        fs_writer = FileSystemWriter(path=path)
+        with self.assertRaisesRegex(ValueError, "Cannot use key named '.metadata'"):
+            save_state_dict(state_dict=state_dict_to_save, storage_writer=fs_writer)
 
 if __name__ == "__main__":
     run_tests()
