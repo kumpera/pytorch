@@ -72,8 +72,7 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
     def test_validate_metadata(self) -> None:
         module = TestModule()
 
-        # compute the default saved metadata (must pass include_non_replicated_tensors or we'll get incomplete MD)
-        metadata, _, _, _ = _prepare(module.state_dict(), include_non_replicated_tensors=True)
+        metadata, _, _, _ = _prepare(module.state_dict())
         self.assertTrue(
             "regular" in metadata.state_dict_metadata,
             f"keys: {metadata.state_dict_metadata.keys()}",
@@ -103,31 +102,16 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
         with self.assertRaisesRegex(ValueError, "Incompatible ShardedTensor size"):
             validate_metadata(module.state_dict(), metadata)
 
-    @with_comms(init_rpc=False)
-    @skip_if_lt_x_gpu(2)
-    @requires_nccl()
-    def test_metadata_is_different_across_ranks(self) -> None:
-        module = TestModule()
-        # compute the default saved metadata (must pass include_non_replicated_tensors or we'll get incomplete MD)
-        metadata, _, _, _ = _prepare(module.state_dict(), include_non_replicated_tensors=False)
-
-        # _prepare skips tensors when rank > 0
-        if dist.get_rank() == 0:
-            self.assertTrue(
-                "regular" in metadata.state_dict_metadata,
-                f"keys: {metadata.state_dict_metadata.keys()}",
-            )
-        else:
-            self.assertTrue(
-                "regular" not in metadata.state_dict_metadata,
-                f"keys: {metadata.state_dict_metadata.keys()}",
-            )
-
     def gen_metadata(self) -> Metadata:
         module = TestModule()
         # compute the default saved metadata (must pass include_non_replicated_tensors or we'll get incomplete MD)
-        metadata, _, _, _ = _prepare(module.state_dict(), include_non_replicated_tensors=True)
-        return metadata
+        metadata, _, _, _ = _prepare(module.state_dict())
+
+        # _prepare only produc
+        metadata = [metadata]
+        dist.broadcast_object_list(metadata)
+
+        return metadata[0]
 
     @with_comms(init_rpc=False)
     @skip_if_lt_x_gpu(2)

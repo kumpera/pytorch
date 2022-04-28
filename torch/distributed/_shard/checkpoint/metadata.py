@@ -37,7 +37,7 @@ class TensorStorageMetadata:
     storage_key: str
 
     # Tensor sizes
-    size: Tuple[int, ...]
+    size: torch.Size
 
 @dataclass
 class BytesStorageMetadata:

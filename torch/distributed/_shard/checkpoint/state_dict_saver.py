@@ -24,15 +24,13 @@ from .storage import StorageWriter
 # -------------- private functions --------------
 
 def _prepare(
-    state_dict: Dict[str, Any], include_non_replicated_tensors: bool = False
+    state_dict: Dict[str, Any]
 ) -> Tuple[Metadata, Dict[str, int], List[BytesWriteRequest], List[TensorWriteRequest]]:
     """
-    Build a serialization plan for a given state_dict
-    By default, regular tensors are only included if execution from `rank 0`.
+    Build the serialization plan for a given state_dict
 
     Args:
         state_dict: The instance to plan for.
-        include_non_replicated_tensors: Include non-sharded tensors even if rank != 0
 
     Returns:
         A tuple with the following values:
@@ -51,17 +49,14 @@ def _prepare(
         tensor_write_requests: List[TensorWriteRequest]
             List of Tensor write requests that should be performed by the writer.
 
-    NB: `include_non_replicated_tensors=True` only makes sense for testing or validation.
-    Do not use it with load/save as it will lead to invalid checkpoints.
-
     """
     metadata = Metadata(state_dict_metadata={})
     tensor_write_requests: List[TensorWriteRequest] = []
     bytes_write_requests: List[BytesWriteRequest] = []
     storage_key_to_fqn: Dict[str, str] = dict()
-    # The assumption is that all non-sharded items are fully replicated
-    #   so we can save all of them from rank 0.
-    include_non_replicated_items = include_non_replicated_tensors or not (dist.is_initialized() and dist.get_rank() != 0)
+    # The assumption is that all non ShardedTensor items are replicated
+    #   and we can save them from rank 0.
+    write_replicated_data = not (dist.is_initialized() and dist.get_rank() != 0)
 
     for fqn, obj in state_dict.items():
         if isinstance(obj, ShardedTensor):
@@ -69,16 +64,19 @@ def _prepare(
             tensor_write_requests += st_write_reqs
             metadata.state_dict_metadata[fqn] = st_md
         elif isinstance(obj, Tensor):
-            if include_non_replicated_items:
-                write_reqs, tensor_md = _prepare_tensor_write(obj, fqn, storage_key_to_fqn)
+            write_reqs, tensor_md = _prepare_tensor_write(obj, fqn, storage_key_to_fqn)
+            if write_replicated_data:
                 tensor_write_requests += write_reqs
-                metadata.state_dict_metadata[fqn] = tensor_md
-        elif include_non_replicated_items:
+            metadata.state_dict_metadata[fqn] = tensor_md
+        else:
             bytes_io = io.BytesIO()
-            torch.save(obj, bytes_io)
-
+            # This produces incomplete MD for rank > 0 since we won't populate bytes_io.
+            # This is ok since only rank == 0 uses this data
+            if write_replicated_data:
+                torch.save(obj, bytes_io)
             byte_write_reqs, bytes_md = _prepare_bytes_write(bytes_io, fqn, storage_key_to_fqn)
-            bytes_write_requests += byte_write_reqs
+            if write_replicated_data:
+                bytes_write_requests += byte_write_reqs
             metadata.state_dict_metadata[fqn] = bytes_md
 
     storage_keys: Dict[str, int] = {
