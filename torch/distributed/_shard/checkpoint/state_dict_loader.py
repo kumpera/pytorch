@@ -14,6 +14,7 @@ from torch.distributed._shard.sharding_spec._internals import (
 
 from .metadata import (
     BytesReadRequest,
+    BytesStorageMetadata,
     TensorReadRequest,
     Metadata,
     ShardedTensorStorageMetadata,
@@ -42,7 +43,7 @@ def _reshard_and_prepare_read_request(
             else:
                 raise ValueError(
                     f"Invalid checkpoint metadata for {fqn}, " +
-                    "expected ShardedTensorStorageMetadata but found {type(md)}"
+                    f"expected ShardedTensorStorageMetadata but found {type(md)}"
                 )
         elif isinstance(obj, torch.Tensor):
             tensor = obj.detach()
@@ -50,7 +51,7 @@ def _reshard_and_prepare_read_request(
             if isinstance(md, TensorStorageMetadata):
                 rr = TensorReadRequest(
                     tensor=tensor,
-                    storage_key=fqn,
+                    storage_key=md.storage_key,
                     offsets=tuple([0] * len(tensor.size())),
                     lengths=md.size,
                 )
@@ -59,19 +60,27 @@ def _reshard_and_prepare_read_request(
             else:
                 raise ValueError(
                     f"Invalid checkpoint metadata for {fqn}, " +
-                    "expected TensorStorageMetadata but found {type(md)}"
+                    f"expected TensorStorageMetadata but found {type(md)}"
                 )
         else:
+            md = metadata_from_storage.state_dict_metadata[fqn]
             # This is actually hard to handle correctly
             # If the value is not a tensor but any random obj,
             # we cannot just write whatever memory it points to inplace
             # the best we can to is to replace it with an object of the same type
-            bytes_io = io.BytesIO()
-            brr = BytesReadRequest(
-                bytes=bytes_io,
-                storage_key=fqn,
-            )
-            bytes_read_requests.append(brr)
+            if isinstance(md, BytesStorageMetadata):
+                bytes_io = io.BytesIO()
+                brr = BytesReadRequest(
+                    bytes=bytes_io,
+                    storage_key=md.storage_key,
+                )
+                bytes_read_requests.append(brr)
+            else:
+                raise ValueError(
+                    f"Invalid checkpoint metadata for {fqn}, " +
+                    f"expected BytesStorageMetadata but found {type(md)}"
+                )
+
 
     return (bytes_read_requests, tensor_read_requests)
 
@@ -92,7 +101,11 @@ def load_state_dict(
     All tensors in ``state_dict`` must be allocated on their
     destination device prior to calling this function.
 
-    All non-tensor data is loaded using `torch.load()`.
+    All non-tensor data is loaded using `torch.load()` and modified in place
+    on state_dict.
+
+    Users must call `load_state_dict` on the root module to ensure load
+    pos-processing and non-tensor data properly propagates.
 
     Args:
         state_dict (Dict[str, Any]) : The state_dict to load. Note that this
@@ -113,9 +126,9 @@ def load_state_dict(
         >>>     storage_reader=fs_storage_loader,
         >>> )
 
-        >>> # module.load_state_dict() functon might have customized steps
-        >>> # to flush the state_dict, must call them to
-        >>> # ensure the correct behavior
+        >>> # module.load_state_dict() function might have customized steps
+        >>> # to flush the state_dict, must call it to
+        >>> # ensure correct behavior.
         >>> my_model.load_state_dict(model_state_dict)
     """
 

@@ -1,6 +1,10 @@
-from typing import List, Tuple
+import hashlib
+import io
+from typing import List, Tuple, Dict
 
 import torch
+from torch import Tensor
+
 from torch.distributed._shard.sharded_tensor import (
     ShardedTensor,
 )
@@ -12,11 +16,34 @@ from torch.distributed._shard.sharding_spec._internals import (
 )
 
 from .metadata import (
+    BytesStorageMetadata,
+    BytesWriteRequest,
     TensorReadRequest,
     ShardStorageMetadata,
     ShardedTensorStorageMetadata,
+    TensorStorageMetadata,
     TensorWriteRequest,
 )
+
+def _create_storage_key(
+        storage_key_to_fqn: Dict[str, str],
+        fqn: str
+) -> str:
+    """
+    Compute the storage key from the Fully Qualified Name
+    Storage keys must respect the following properties:
+    1) Globally unique name across all objects and ranks.
+    2) Suitable for usage with common storage systems (IE, alphanumeric only)
+    """
+
+    storage_key = hashlib.sha256(bytes(fqn, "utf-8")).hexdigest()
+    counter = 0
+    while storage_key in storage_key_to_fqn:
+        storage_key = hashlib.sha256(bytes(f"{fqn}{counter}", "utf-8")).hexdigest()
+        counter += 1
+
+    storage_key_to_fqn[storage_key] = fqn
+    return storage_key
 
 # This constant is used as the separator character between tensor name and shard name
 STORAGE_KEY_SEPARATOR = "$"
@@ -67,14 +94,6 @@ def _shards_get_overlap_region_wrt_saved_tensor(
     return narrows
 
 
-def _get_shard_storage_key(
-    tensor_storage_key: str,
-    shard: ShardMetadata
-) -> str:
-    shard_key = "_".join([str(i) for i in shard.shard_offsets])
-    return f"{tensor_storage_key}{STORAGE_KEY_SEPARATOR}{shard_key}"
-
-
 def _get_sharded_tensor_element_size(tensor: ShardedTensor) -> int:
     if len(tensor.local_shards()) > 0:
         test_tensor = tensor.local_shards()[0].tensor
@@ -84,12 +103,14 @@ def _get_sharded_tensor_element_size(tensor: ShardedTensor) -> int:
 
     return test_tensor.element_size()
 
+
 def _compute_sharded_tensor_md(
-    storage_key: str, tensor: ShardedTensor
+    tensor: ShardedTensor,
+    shard_to_storage_key: Dict[str, str]
 ) -> ShardedTensorStorageMetadata:
     smd = []
     for shard_md in tensor.metadata().shards_metadata:
-        shard_storage_key = _get_shard_storage_key(storage_key, shard_md)
+        shard_storage_key = shard_to_storage_key[_get_shard_key(shard_md)]
 
         shard_size = 1
         for d in shard_md.shard_sizes:
@@ -111,9 +132,28 @@ def _compute_sharded_tensor_md(
     )
 
 
+def _get_shard_key(shard: ShardMetadata) -> str:
+    """
+    Compute an unique key for a shard.
+
+    This key is unique vis-a-vis other shard of the owning ShardedTensor
+    """
+    return "_".join([str(i) for i in shard.shard_offsets])
+
+def _get_shard_storage_key(
+    tensor_storage_key: str,
+    shard: ShardMetadata,
+    storage_key_to_fqn: Dict[str, str]
+) -> str:
+    shard_key = f"{tensor_storage_key}{STORAGE_KEY_SEPARATOR}{_get_shard_key(shard)}"
+
+    return _create_storage_key(storage_key_to_fqn, shard_key)
+
+
 def _prepare_sharded_tensor_write(
     sharded_tensor: ShardedTensor,
     storage_key: str,
+    storage_key_to_fqn: Dict[str, str]
 ) -> Tuple[List[TensorWriteRequest], ShardedTensorStorageMetadata]:
     """
     Prepare sharded tensor write.
@@ -121,6 +161,7 @@ def _prepare_sharded_tensor_write(
     Args:
         sharded_tensor: The sharded tensor to persist.
         storage_key: The identifier for `sharded_tensor`.
+        storage_key_to_fqn: dict used to produce storage keys
 
     Returns:
         Write requests for persisting the sharded tensor, and metadata
@@ -130,10 +171,15 @@ def _prepare_sharded_tensor_write(
 
     """
     write_requests = []
+    shard_to_storage_key: Dict[str, str] = dict()
+
+    for shard_md in sharded_tensor.metadata().shards_metadata:
+        shard_storage_key = _get_shard_storage_key(storage_key, shard_md, storage_key_to_fqn)
+        shard_to_storage_key[_get_shard_key(shard_md)] = shard_storage_key
+
     for shard in sharded_tensor.local_shards():
         tensor = shard.tensor.detach()
-        shard_storage_key = _get_shard_storage_key(storage_key, shard.metadata)
-
+        shard_storage_key = shard_to_storage_key[_get_shard_key(shard.metadata)]
 
         wr = TensorWriteRequest(
             tensor=tensor,
@@ -141,7 +187,7 @@ def _prepare_sharded_tensor_write(
         )
         write_requests.append(wr)
     return write_requests, _compute_sharded_tensor_md(
-        storage_key, sharded_tensor
+        sharded_tensor, shard_to_storage_key
     )
 
 
@@ -162,13 +208,11 @@ def _prepare_sharded_tensor_read(
         tensor.
     """
     read_reqs = []
+    # this is a naive quadratic algo that can be optimized later
     for shard in sharded_tensor_out.local_shards():
         # scan all mds looking for chunks
         for storage_md in metadata.storage_metadata:
             shard_md_from_storage = storage_md.shard_metadata
-            tensor = shard.tensor.detach()
-            assert shard_md_from_storage is not None
-            # this is a naive quadratic algo that can later be optimized
 
             # do they overlap?
             if not _check_shard_metadata_pair_overlap(
@@ -177,8 +221,7 @@ def _prepare_sharded_tensor_read(
                 continue
 
             storage_key = storage_md.storage_key
-
-            target_tensor = tensor
+            target_tensor = shard.tensor.detach()
             offsets = []
             lengths = []
             for (
@@ -206,3 +249,42 @@ def _prepare_sharded_tensor_read(
                 )
             )
     return read_reqs
+
+def _compute_tensor_md(storage_key: str, tensor: Tensor) -> TensorStorageMetadata:
+    return TensorStorageMetadata(
+        storage_key=storage_key,
+        size=tensor.size()
+    )
+
+def _prepare_tensor_write(
+    tensor: Tensor, fqn: str, storage_key_to_fqn: Dict[str, str]
+) -> Tuple[List[TensorWriteRequest], TensorStorageMetadata]:
+    storage_key = _create_storage_key(storage_key_to_fqn, fqn)
+
+    write_reqs = [
+        TensorWriteRequest(
+            tensor=tensor.detach(),
+            storage_key=storage_key,
+        )
+    ]
+    return (write_reqs, _compute_tensor_md(storage_key, tensor))
+
+
+def _compute_bytes_md(storage_key: str, bytes: io.BytesIO) -> BytesStorageMetadata:
+    return BytesStorageMetadata(
+        storage_key=storage_key,
+        length=len(bytes.getbuffer())
+    )
+
+def _prepare_bytes_write(
+    bytes: io.BytesIO, fqn: str, storage_key_to_fqn: Dict[str, str]
+) -> Tuple[List[BytesWriteRequest], BytesStorageMetadata]:
+    storage_key = _create_storage_key(storage_key_to_fqn, fqn)
+
+    write_reqs = [
+        BytesWriteRequest(
+            bytes=bytes,
+            storage_key=storage_key,
+        )
+    ]
+    return (write_reqs, _compute_bytes_md(storage_key, bytes))

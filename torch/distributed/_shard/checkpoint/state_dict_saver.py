@@ -11,19 +11,17 @@ from torch.distributed._shard.sharded_tensor import (
 from .metadata import (
     Metadata,
     BytesWriteRequest,
-    TensorStorageMetadata,
     TensorWriteRequest,
 )
-from .resharding import _prepare_sharded_tensor_write
+from .resharding import (
+    _prepare_sharded_tensor_write,
+    _prepare_tensor_write,
+    _prepare_bytes_write
+)
+
 from .storage import StorageWriter
 
 # -------------- private functions --------------
-def _compute_tensor_md(fqn: str, tensor: Tensor) -> TensorStorageMetadata:
-    return TensorStorageMetadata(
-        storage_key=fqn,
-        size=tensor.size()
-    )
-
 
 def _prepare(
     state_dict: Dict[str, Any], include_non_replicated_tensors: bool = False
@@ -60,38 +58,28 @@ def _prepare(
     metadata = Metadata(state_dict_metadata={})
     tensor_write_requests: List[TensorWriteRequest] = []
     bytes_write_requests: List[BytesWriteRequest] = []
+    storage_key_to_fqn: Dict[str, str] = dict()
+    # The assumption is that all non-sharded items are fully replicated
+    #   so we can save all of them from rank 0.
+    include_non_replicated_items = include_non_replicated_tensors or not (dist.is_initialized() and dist.get_rank() != 0)
 
     for fqn, obj in state_dict.items():
         if isinstance(obj, ShardedTensor):
-            write_reqs, md = _prepare_sharded_tensor_write(obj, fqn)
-            tensor_write_requests += write_reqs
-            metadata.state_dict_metadata[fqn] = md
+            st_write_reqs, st_md = _prepare_sharded_tensor_write(obj, fqn, storage_key_to_fqn)
+            tensor_write_requests += st_write_reqs
+            metadata.state_dict_metadata[fqn] = st_md
         elif isinstance(obj, Tensor):
-            # The assumption is that non ShardedTensors are full replicated across all ranks
-            # So we just need one from Rank 0.
-            # If that's not the case, we will update later.
-            if (
-                not include_non_replicated_tensors
-                and dist.is_initialized()
-                and dist.get_rank() != 0
-            ):
-                pass
-            else:
-                tensor_write_requests.append(
-                    TensorWriteRequest(
-                        tensor=obj.detach(),
-                        storage_key=fqn,
-                    )
-                )
-                metadata.state_dict_metadata[fqn] = _compute_tensor_md(fqn, obj)
-        else:
+            if include_non_replicated_items:
+                write_reqs, tensor_md = _prepare_tensor_write(obj, fqn, storage_key_to_fqn)
+                tensor_write_requests += write_reqs
+                metadata.state_dict_metadata[fqn] = tensor_md
+        elif include_non_replicated_items:
             bytes_io = io.BytesIO()
             torch.save(obj, bytes_io)
-            bwr = BytesWriteRequest(
-                bytes=bytes_io,
-                storage_key=fqn,
-            )
-            bytes_write_requests.append(bwr)
+
+            byte_write_reqs, bytes_md = _prepare_bytes_write(bytes_io, fqn, storage_key_to_fqn)
+            bytes_write_requests += byte_write_reqs
+            metadata.state_dict_metadata[fqn] = bytes_md
 
     storage_keys: Dict[str, int] = {
         req.storage_key: req.tensor.nelement() * req.tensor.element_size()

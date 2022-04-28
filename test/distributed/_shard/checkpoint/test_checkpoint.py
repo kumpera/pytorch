@@ -209,12 +209,61 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
         )
 
         st = sharded_tensor.zeros(spec, 4, 4, dtype=torch.float64)
+        mapping = dict()
 
-        (_, md) = _prepare_sharded_tensor_write(st, "tensor")
+        (_, md) = _prepare_sharded_tensor_write(st, "tensor", mapping)
 
         self.assertEqual(1, len(md.storage_metadata))
         self.assertEqual(4 * 4 * 8, md.storage_metadata[0].length)
+        self.assertEqual(1, len(mapping))
 
+
+    @with_comms(init_rpc=False)
+    @skip_if_lt_x_gpu(2)
+    @requires_nccl()
+    def test_storage_key_mapping(self) -> None:
+        device = f"cuda:{dist.get_rank()}"
+        spec = ChunkShardingSpec(
+            dim=0,
+            placements=[
+                "rank:0/cuda:0",
+                "rank:1/cuda:1",
+            ],
+        )
+
+        state_dict = {
+            'sharded': sharded_tensor.rand(spec, (10, 10, )),
+            'replicated': torch.rand(4, device=device),
+            'bytes': [1, 2, 3, 4],
+        }
+
+        metadata, _, bytes_reqs, tensor_reqs = _prepare(state_dict)
+
+        if self.rank == 0:
+            self.assertEqual(1, len(bytes_reqs))
+            self.assertEqual(2, len(tensor_reqs))
+
+            self.assertTrue('bytes' in metadata.state_dict_metadata)
+            self.assertEqual(bytes_reqs[0].storage_key, metadata.state_dict_metadata['bytes'].storage_key)
+
+            # tensor ordering is unspecified
+            if len(tensor_reqs[0].tensor.size()) == 1:
+                replicated = tensor_reqs[0]
+                shard = tensor_reqs[1]
+            else:
+                replicated = tensor_reqs[1]
+                shard = tensor_reqs[0]
+
+            self.assertTrue('replicated' in metadata.state_dict_metadata)
+            self.assertEqual(replicated.storage_key, metadata.state_dict_metadata['replicated'].storage_key)
+        else:
+            self.assertEqual(0, len(bytes_reqs))
+            self.assertEqual(1, len(tensor_reqs))
+            shard = tensor_reqs[0]
+
+            self.assertTrue('sharded' in metadata.state_dict_metadata)
+            shard_keys = [sm.storage_key for sm in metadata.state_dict_metadata['sharded'].storage_metadata]
+            self.assertTrue(shard.storage_key in shard_keys)
 
 
 if __name__ == "__main__":

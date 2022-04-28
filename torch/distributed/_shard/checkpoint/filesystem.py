@@ -30,13 +30,7 @@ class FileSystemWriter(StorageWriter):
         self.path = path
         os.makedirs(self.path, exist_ok=True)
 
-    def _check_for_bad_keys(self, requests):
-        if any([r for r in requests if r.storage_key == ".metadata"]):
-            raise ValueError("Cannot use key named '.metadata'")
-
-
     def write_bytes(self, requests: List[BytesWriteRequest]) -> Future[None]:
-        self._check_for_bad_keys(requests)
         for req in requests:
             _get_file_storage_path(self.path, req.storage_key).write_bytes(
                 req.bytes.getbuffer()
@@ -46,7 +40,6 @@ class FileSystemWriter(StorageWriter):
         return fut
 
     def write_tensors(self, requests: List[TensorWriteRequest]) -> Future[None]:
-        self._check_for_bad_keys(requests)
         for req in requests:
             # The following couple lines are simple implementation to get
             # things going.
@@ -61,12 +54,8 @@ class FileSystemWriter(StorageWriter):
             #   compatibility, we should consider replacing it with a more
             #   stable option.
             # 2. pickle is not streamable.
-            # buffer = io.BytesIO()
             with _get_file_storage_path(self.path, req.storage_key).open("wb") as w:
                 torch.save(req.tensor, w)
-            # _get_file_storage_path(self.path, req.storage_key).write_bytes(
-            #     buffer.getbuffer()
-            # )
 
         fut: Future[None] = Future()
         fut.set_result(None)
