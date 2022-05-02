@@ -73,6 +73,7 @@ def _reshard_and_prepare_read_request(
                 brr = BytesReadRequest(
                     bytes=bytes_io,
                     storage_key=md.storage_key,
+                    fqn=fqn
                 )
                 bytes_read_requests.append(brr)
             else:
@@ -137,7 +138,6 @@ def load_state_dict(
         state_dict=state_dict, metadata_from_storage=metadata
     )
     bytes_futures = storage_reader.read_bytes(bytes_read_requests)
-
     tensor_futures = storage_reader.read_tensors(tensor_read_requests)
 
     bytes_futures.wait()
@@ -146,10 +146,9 @@ def load_state_dict(
     # Note that this is NOT inplace,
     # it creating a new object and replace what's in the state dict
     for req in bytes_read_requests:
-        fqn = req.storage_key
         # Ensure the BytesIO is rewound
         req.bytes.seek(0)
-        state_dict[fqn] = torch.load(req.bytes)
+        state_dict[req.fqn] = torch.load(req.bytes)
 
     tensor_futures.wait()
 

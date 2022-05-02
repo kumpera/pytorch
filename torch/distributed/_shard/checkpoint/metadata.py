@@ -72,6 +72,7 @@ class BytesWriteRequest:
 class BytesReadRequest:
     bytes: io.BytesIO
     storage_key: str
+    fqn: str
 
 
 @dataclass

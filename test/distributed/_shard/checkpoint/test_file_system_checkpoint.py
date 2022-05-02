@@ -449,5 +449,31 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
         if dist.get_rank() == 0:
             self.assertTrue(torch.allclose(store_tensor, load_tensor))
 
+
+    @with_comms(init_rpc=False)
+    @skip_if_lt_x_gpu(2)
+    @requires_nccl()
+    def test_save_load_bytes(self) -> None:
+        path = self.get_file_path()
+
+        state_dict_to_save = {
+            'bytes0': [1],
+            'bytes1': 'string'
+        }
+
+        fs_writer = FileSystemWriter(path=path)
+        save_state_dict(state_dict=state_dict_to_save, storage_writer=fs_writer)
+
+        state_dict_to_load = {
+            'bytes0': [2],
+            'bytes1': 'other'
+        }
+
+        fs_reader = FileSystemReader(path=path)
+        load_state_dict(state_dict=state_dict_to_load, storage_reader=fs_reader)
+
+        self.assertEqual([1], state_dict_to_load['bytes0'])
+        self.assertEqual('string', state_dict_to_load['bytes1'])
+
 if __name__ == "__main__":
     run_tests()
