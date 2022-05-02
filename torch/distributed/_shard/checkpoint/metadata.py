@@ -51,8 +51,7 @@ STORAGE_TYPES = Union[ShardedTensorStorageMetadata, TensorStorageMetadata, Bytes
 
 @dataclass
 class Metadata:
-    # Metadata for the state dict.
-    # This includes the MD for Tensors and ShardedTensors. ByteIO objects are skipped
+    # Keys are the same from the `state_dict` used.
     state_dict_metadata: Dict[str, STORAGE_TYPES]
 
     def __getstate__(self) -> bytes:

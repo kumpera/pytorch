@@ -23,6 +23,10 @@ from torch.testing._internal.distributed._shard.sharded_tensor import (
     ShardedTensorTestBase,
     with_comms,
 )
+from torch.testing._internal.distributed._shard.sharded_tensor._test_st_common import (
+    MyShardedModel1
+)
+
 
 from torch.testing._internal.common_utils import (
     TEST_WITH_DEV_DBG_ASAN,
@@ -191,44 +195,6 @@ class MyShardedModel3(torch.nn.Module):
         )
 
 
-class MyShardedModel2(torch.nn.Module):
-    sharded_tensor2: Optional[ShardedTensor]
-
-    def __init__(
-        self,
-        spec: Optional[ShardingSpec] = None,
-        # pyre-fixme [11]: Annotation `dist.ProcessGroup` is not defined as a type.
-        group: Optional[dist.ProcessGroup] = None,
-    ) -> None:
-        super(MyShardedModel2, self).__init__()
-        if spec is not None:
-            self.sharded_tensor2 = sharded_tensor.rand(
-                spec, 10, 20, process_group=group, init_rrefs=False
-            )
-        else:
-            self.sharded_tensor2 = None
-        self.random_tensor2 = torch.nn.Parameter(torch.rand(2, 2))
-
-
-class MyShardedModel1(torch.nn.Module):
-    sharded_tensor1: Optional[ShardedTensor]
-
-    def __init__(
-        self,
-        spec: Optional[ShardingSpec] = None,
-        group: Optional[dist.ProcessGroup] = None,
-    ) -> None:
-        super(MyShardedModel1, self).__init__()
-        if spec is not None:
-            self.sharded_tensor1 = sharded_tensor.rand(
-                spec, 10, 20, process_group=group, init_rrefs=False
-            )
-        else:
-            self.sharded_tensor1 = None
-        self.random_tensor1 = torch.nn.Parameter(torch.rand(2, 2))
-        self.submodule = MyShardedModel2(spec, group)
-
-
 class TestDistributedStateDictSaveLoad(TestCase):
     def test_read_write_only_tensor(self) -> None:
         state_dict_to_save = MyTestModule().state_dict()
@@ -272,7 +238,7 @@ class TestDistributedStateDictSaveLoadWithSharedTensor(ShardedTensorTestBase):
             ],
         )
 
-        model_to_save = MyShardedModel1(spec)
+        model_to_save = MyShardedModel1(spec, init_rrefs=False)
 
         # Test save
         model_to_save._register_state_dict_hook(state_dict_hook)
@@ -284,7 +250,7 @@ class TestDistributedStateDictSaveLoadWithSharedTensor(ShardedTensorTestBase):
         dist.barrier()
 
         # Create a new model
-        model_to_load = MyShardedModel1(spec)
+        model_to_load = MyShardedModel1(spec, init_rrefs=False)
         # This is not the correct hook for loading the state dict
         # model_to_load._register_load_state_dict_pre_hook(pre_load_state_dict_hook, True)
         model_to_load._register_state_dict_hook(state_dict_hook)
