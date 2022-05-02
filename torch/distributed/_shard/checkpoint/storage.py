@@ -21,7 +21,8 @@ class StorageWriter(abc.ABC):
         pre-allocate storage.
     2) write_bytes
     3) write_tensors.
-    4) (if rank == 0) write_metadata().
+    4) Wait for (2) and (3) futures. If either fail, abort checkpoint.
+    5) (if rank == 0) write_metadata().
 
     Rank 0 will wait for (2) and (3) before writing metadata.
     The writes from (2) and (3) are initiated before any waiting is done.

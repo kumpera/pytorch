@@ -129,8 +129,7 @@ def save_state_dict(
         tensor_write_requests,
     ) = _prepare(state_dict)
     storage_writer.prepare_storage(storage_keys=storage_keys)
-    storage_writer.write_metadata(metadata=metadata)
     bytes_futures = storage_writer.write_bytes(bytes_write_requests)
     tensor_futures = storage_writer.write_tensors(tensor_write_requests)
-    bytes_futures.wait()
-    tensor_futures.wait()
+    torch.futures.wait_all([bytes_futures, tensor_futures])
+    storage_writer.write_metadata(metadata=metadata)

@@ -26,8 +26,8 @@ from .metadata import (
 )
 
 def _create_storage_key(
-        storage_key_to_fqn: Dict[str, str],
-        fqn: str
+    storage_key_to_fqn: Dict[str, str],
+    fqn: str
 ) -> str:
     """
     Compute the storage key from the Fully Qualified Name
