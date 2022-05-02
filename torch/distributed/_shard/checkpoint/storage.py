@@ -65,10 +65,17 @@ class StorageWriter(abc.ABC):
     @abc.abstractmethod
     def write_metadata(self, metadata: Metadata) -> None:
         """
-        Writes the metadata.
+        Write the global metadata and commit the checkpoint.
 
-        This method is only called on rank 0.
-        This is called at the end of a checkpoint and signifies its completion.
+        This method is called on rank 0 after all data was writen
+        and is used to commit the checkpoint.
+
+        The `metadata` object includes a global view of the checkpoint
+        and, while writing it is optional, it must be recoverable by the
+        StorageReader implementation.
+
+        The actual format/schema used for serializing `metadata` is
+        considered and implementation detail.
 
         Args:
             metadata (Metadata): metadata for the new checkpoint
