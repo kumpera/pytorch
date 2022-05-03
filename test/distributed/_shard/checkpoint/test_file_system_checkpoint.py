@@ -48,101 +48,6 @@ if TEST_WITH_DEV_DBG_ASAN:
     )
     sys.exit(0)
 
-
-def _custom_gather(
-        self,
-        dst=0,
-        out=None,
-):
-    """
-    Creates a full :class:`Tensor` on rank ``dst`` by gathering all shards of the
-    sharded tensor.
-
-    The API needs to be called on all ranks in SPMD fashion. All ranks should have
-    the same ``dst``. ``out`` should be a tensor of the same size as the overall
-    size of the sharded tensor on ``dst`` and ``None`` on all other ranks.
-
-    Args:
-        dst(int): The rank where full tensor is constructed.
-            Default: 0
-        out (:class `torch.Tensor`, optional): The output full tensor.
-            Must to be provided ONLY on ``dst`` rank.
-            Default: ``None``
-    """
-
-    def shard_size(shard_md):
-        res = 1
-        for s in shard_md.shard_sizes:
-            res *= s
-        return res
-    rank = dist.get_rank(self._process_group)
-    full_size = self.metadata().size
-
-    world_size = dist.get_world_size(self._process_group)
-    rank_sizes = [0 for _ in range(world_size)]
-    max_rank_size = 0
-    shard_placement = dict()
-    local_shards_placement = []
-    # collect sizes
-    for shard_idx, shard_md in enumerate(self.metadata().shards_metadata):
-        shard_rank = shard_md.placement.rank()
-        shard_placement[shard_idx] = (shard_rank, rank_sizes[shard_rank])
-        if shard_rank == rank:
-            local_shards_placement.append((shard_md, rank_sizes[shard_rank],))
-
-        rank_sizes[shard_rank] += shard_size(shard_md)
-        max_rank_size = max(max_rank_size, rank_sizes[shard_rank])
-
-
-    if rank == dst:
-        gather_list = [torch.empty((max_rank_size,), device=out.device) for _ in range(world_size)]
-    else:
-        gather_list = None
-
-    # FIXME is a rank allowed to not have any data?
-    with torch.no_grad():
-        # XXX we can fastpath this to torch.cat if max_rank_size == rank_sizes[rank]
-        data = torch.empty(max_rank_size, device=self.local_shards()[0].tensor.device)
-        for shard in self.local_shards():
-            for placement in local_shards_placement:
-                if placement[0] == shard.metadata:
-                    src = shard.tensor.flatten()
-                    data[placement[1]: placement[1] + src.numel()].copy_(src)
-                    break
-
-    dist.gather(
-        tensor=data,
-        gather_list=gather_list,
-        dst=dst,
-        group=self._process_group,
-    )
-    if rank != dst:
-        return
-    if out is None:
-        raise ValueError("`out` Tensor must be provided on dst rank!")
-
-    full_size = self.metadata().size
-    dims = len(full_size)
-
-
-    for shard_idx, shard_md in enumerate(self.metadata().shards_metadata):
-        placement = shard_placement[shard_idx]
-        tensor = gather_list[placement[0]]
-        tensor = tensor[placement[1] : placement[1] + shard_size(shard_md)]
-        tensor = tensor.view(shard_md.shard_sizes)
-
-        out_narrow_view = out
-        for dim in range(dims):
-            out_narrow_view = out_narrow_view.narrow(
-                dim,
-                shard_md.shard_offsets[dim],
-                shard_md.shard_sizes[dim],
-            )
-
-        out_narrow_view.copy_(tensor)
-
-
-
 def assert_state_dict_equal(
     self: TestCase,
     state_dict_1: Dict[str, torch.Tensor],
@@ -197,22 +102,22 @@ class MyShardedModel3(torch.nn.Module):
 
 class TestDistributedStateDictSaveLoad(TestCase):
     def test_read_write_only_tensor(self) -> None:
-        state_dict_to_save = MyTestModule().state_dict()
-        path = tempfile.mkdtemp()
+        with tempfile.TemporaryDirectory() as path:
+            state_dict_to_save = MyTestModule().state_dict()
 
-        fs_writer = FileSystemWriter(path=path)
-        save_state_dict(state_dict=state_dict_to_save, storage_writer=fs_writer)
+            fs_writer = FileSystemWriter(path=path)
+            save_state_dict(state_dict=state_dict_to_save, storage_writer=fs_writer)
 
-        state_dict_to_load_to = MyTestModule().state_dict()
+            state_dict_to_load_to = MyTestModule().state_dict()
 
-        with self.assertRaises(AssertionError):
+            with self.assertRaises(AssertionError):
+                assert_state_dict_equal(self, state_dict_to_load_to, state_dict_to_save)
+
+            # Load from file without any resharding
+            fs_reader = FileSystemReader(path=path)
+            load_state_dict(state_dict=state_dict_to_load_to, storage_reader=fs_reader)
+
             assert_state_dict_equal(self, state_dict_to_load_to, state_dict_to_save)
-
-        # Load from file without any resharding
-        fs_reader = FileSystemReader(path=path)
-        load_state_dict(state_dict=state_dict_to_load_to, storage_reader=fs_reader)
-
-        assert_state_dict_equal(self, state_dict_to_load_to, state_dict_to_save)
 
 
 class TestDistributedStateDictSaveLoadWithSharedTensor(ShardedTensorTestBase):
@@ -281,7 +186,7 @@ class TestDistributedReshardOnLoad(ShardedTensorTestBase):
 
     def load_tensor(self, tensor: ShardedTensor) -> torch.Tensor:
         res = torch.zeros(tensor.shape, device="cuda:0") if dist.get_rank() == 0 else None
-        _custom_gather(tensor, out=res)
+        tensor.gather(out=res)
         return cast(Tensor, res)
 
     @with_comms(init_rpc=False)
