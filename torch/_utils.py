@@ -4,6 +4,8 @@ import warnings
 from collections import defaultdict
 import sys
 import traceback
+import contextlib
+import threading
 
 
 
@@ -130,9 +132,10 @@ def _get_async_or_non_blocking(function_name, non_blocking, kwargs):
 # TODO: Once we decide to break serialization FC, `storage` no longer needs to
 # be a _TypedStorage
 def _rebuild_tensor(storage, storage_offset, size, stride):
-    # first construct a tensor with the correct dtype/device
-    t = torch.tensor([], dtype=storage.dtype, device=storage._untyped().device)
-    return t.set_(storage._untyped(), storage_offset, size, stride)
+    orig_device = storage._untyped().device
+
+    t = torch.tensor([], dtype=storage.dtype, device=orig_device)
+    return t.set_(storage._untyped(), storage_offset, size, stride).to(_get_restore_device(orig_device))
 
 
 def _rebuild_tensor_v2(storage, storage_offset, size, stride, requires_grad, backward_hooks):
@@ -194,8 +197,34 @@ def _rebuild_sparse_csr_tensor(layout, data):
     raise NotImplementedError("rebuilding sparse tensor for layout %s" % (layout))
 
 
+_thread_local_pickle_device = threading.local()
+
+@contextlib.contextmanager
+def pickle_device_override(device):
+    """
+    Context manager to override the target device used to restore tensor to.
+    """
+    global _thread_local_pickle_device
+
+    if hasattr(_thread_local_pickle_device, "device"):
+        raise ValueError("Cannot nest usage of pickle_device_override")
+
+    _thread_local_pickle_device.device = device
+    try:
+        yield
+    finally:
+        del _thread_local_pickle_device.device
+
+def _get_restore_device(device):
+    if hasattr(_thread_local_pickle_device, "device"):
+        device = _thread_local_pickle_device.device
+    return device
+
+
 def _rebuild_device_tensor_from_numpy(data, dtype, device, requires_grad):
-    tensor = torch.from_numpy(data).to(dtype=dtype, device=device)
+    global _thread_local_pickle_device
+
+    tensor = torch.from_numpy(data).to(dtype=dtype, device=_get_restore_device(device))
     tensor.requires_grad = requires_grad
     return tensor
 
@@ -211,7 +240,7 @@ def _rebuild_meta_tensor_no_storage(dtype, size, stride, requires_grad):
 def _rebuild_wrapper_subclass(cls, dtype, size, stride, storage_offset, layout, device, requires_grad):
     return torch.Tensor._make_wrapper_subclass(  # type: ignore[attr-defined]
         cls, size, strides=stride, storage_offset=storage_offset, layout=layout,
-        device=device, requires_grad=requires_grad)
+        device=device, requires_grad=requires_grad).to(_get_restore_device(device))
 
 
 # TODO: Once we decide to break serialization FC, `storage` no longer needs to
