@@ -1,97 +1,125 @@
-import io
-from typing import Any, Dict, List, Tuple, Optional, Union
-
-
+import abc
+import traceback
+from typing import Any, Callable, Dict, List, Tuple, Optional, Union
 import torch
+import io
 import torch.distributed as dist
-
-from torch import Tensor
-from torch.distributed._shard.sharded_tensor import (
-    ShardedTensor,
-)
 
 from .metadata import (
     Metadata,
-    BytesWriteRequest,
-    TensorWriteRequest,
 )
+
 from .resharding import (
-    _prepare_sharded_tensor_write,
-    _prepare_tensor_write,
-    _prepare_bytes_write
+    create_default_local_plan,
+    create_default_global_plan,
+    create_default_metadata_only_plan,
+    create_default_checkpoint_metadata,
+    DefaultPlanner
 )
 
 from .storage import (
     StorageWriter,
+    WriteItem,
+    WriteResult,
+    LocalPlan,
+    Planner
 )
 
+from .utils import DistWrapper
 from .api import CheckpointException
 
 # -------------- private functions --------------
 
-def _prepare(
-    state_dict: Dict[str, Any],
-    write_replicated_data: bool,
-    process_group: Optional[dist.ProcessGroup] = None,
-) -> Tuple[Metadata, List[BytesWriteRequest], List[TensorWriteRequest]]:
-    """
-    Build the serialization plan for a given state_dict
+"""
+Bad part of the current design:
 
-    Args:
-        state_dict: The instance to plan for.
+1) We use List[Plan] with ranks implicitly encoded in the index.
+    Should we use Dict[int, Plan] instead?
 
-    Returns:
-        A tuple with the following values:
+Do we need to include the source rank of the write request?
+    It's implicit in the Plan object (maybe needs to be in Plan)
 
-        metadata: Metadata
-        The storage metadata describing Tensor and ShardedTensors
-        instances found in `state_dict`. See `Metadata` for the schema.
+How would this handle the planner load balancing across ranks?
+    It can handle both through rejection and stealing.
 
-        size_for_storage_keys: Dict[str, int]
-            Key is the storage key name, value is the associated size
-            It can used to pre allocate the storage for parallel and non sequential writes.
+2)Write data is eagerly evaluated
+The current model forces data to be eagerly evaluated which disables incremental
+    serialization/transformation.
 
-        bytes_write_requests: List[BytesWriteRequest]
-            List of ByteIO write requests that should be performed by the writer.
+3) The way the planner and the storage layer attach data is different
+    storage does it through storage_data fields
+    planner does it through extending PlanningClasses
 
-        tensor_write_requests: List[TensorWriteRequest]
-            List of Tensor write requests that should be performed by the writer.
+4) The only MD that can be sent back from ranks is through WriteResults
+    Not great
 
-    """
-    metadata = Metadata(state_dict_metadata={})
-    tensor_write_requests: List[TensorWriteRequest] = []
-    bytes_write_requests: List[BytesWriteRequest] = []
-    storage_key_to_fqn: Dict[str, str] = dict()
+FIXME:
+    There's no way to pass ShardedTensor and global planner/storage data
+    to the final MD payload. At least not with the default planner.
+"""
 
-    for fqn, obj in state_dict.items():
-        if isinstance(obj, ShardedTensor):
-            st_write_reqs, st_md = _prepare_sharded_tensor_write(obj, fqn, storage_key_to_fqn)
-            tensor_write_requests += st_write_reqs
-            metadata.state_dict_metadata[fqn] = st_md
-        elif isinstance(obj, Tensor):
-            write_reqs, tensor_md = _prepare_tensor_write(obj, fqn, storage_key_to_fqn)
-            if write_replicated_data:
-                tensor_write_requests += write_reqs
-            metadata.state_dict_metadata[fqn] = tensor_md
-        else:
-            bytes_io = io.BytesIO()
-            # This produces incomplete MD for rank > 0 since we won't populate bytes_io.
-            # This is ok since only rank == 0 uses this data
-            if write_replicated_data:
-                torch.save(obj, bytes_io)
-            byte_write_reqs, bytes_md = _prepare_bytes_write(bytes_io, fqn, storage_key_to_fqn)
-            if write_replicated_data:
-                bytes_write_requests += byte_write_reqs
-            metadata.state_dict_metadata[fqn] = bytes_md
+def _create_metadata_from_local_state_dict(state_dict: Dict[str, Any]) -> Metadata:
+    plan = create_default_metadata_only_plan(state_dict)
+    results = [WriteResult.from_write_item(req, "") for req in plan.items]
+    return create_default_checkpoint_metadata([results])
 
-    return (metadata, bytes_write_requests, tensor_write_requests)
+"""
+New protocol:
 
+prepare: (coordinator)
+    storage.prepare() -> None 
+
+local_plan: (all ranks)
+    planner.local_plan -> storage.local_plan -> LocalPlan
+
+global_plan (coordinator)
+    planner.global_plan -> storage.global_plan -> GlobalPlan (list of LocalPlan)
+
+finalize_plan: (all ranks)
+    planner.merge_plan(local, global) -> storage.prepare_writes -> write requests
+
+write time:( all ranks)
+    storage.write_data -> [WriteResult]
+
+finish: (coordinator)
+    planner.create_metadata([WriteResult]) -> Metadata
+    storagw.finish(metadata) -> None
+
+Notes:
+
+Should storage.prepare() return something?
+Lots of kinds of metadata hard/odd to ship to create_md:
+    - per checkpoint data
+    - per rank data (this could be items with different data but same FQN)
+Should storage.finish() return something?
+
+How to present the global plan?
+    List of LocalPlan
+    Dict of rank -> LocalPLan
+    A GlobalPlan object (which we'd broadcast to all ranks?)
+
+
+Load protocol::
+
+plan: (all ranks)
+    planner.prepare_read -> read requests
+
+
+read: (all ranks)
+    storage.read()
+
+
+Notes:
+    Should we pass Planners around or functions? 
+
+"""
 def save_state_dict(
     state_dict: Dict[str, Any],
     storage_writer: StorageWriter,
     process_group: Optional[dist.ProcessGroup] = None,
     coordinator_rank: int = 0,
-    no_dist: bool = False
+    no_dist: bool = False,
+    planner: Planner = None
 ) -> None:
     """
     Save a distributed model in SPMD style.
@@ -142,75 +170,83 @@ def save_state_dict(
         has an individual GPU, via ``torch.cuda.set_device()``
     """
     is_coordinator = no_dist or dist.get_rank(process_group) == coordinator_rank
+    distW = DistWrapper(process_group, not no_dist, coordinator_rank)
 
-    exceptions: List[Optional[BaseException]] = [None]
+    if planner is None:
+        planner = DefaultPlanner()
+
+    exception: Optional[BaseException] = None
     if is_coordinator:
         try:
             storage_writer.prepare()
         except BaseException as e:
-            exceptions = [e]
+            traceback.print_exc()
+            exception = e
 
     # Writing can only start once prepare has finished
-    if not no_dist:
-        dist.broadcast_object_list(exceptions, group=process_group, src=coordinator_rank)
-
-    if exceptions[0] is not None:
-        raise CheckpointException("failed to prepare storage", {coordinator_rank : exceptions[0]})
+    exception = distW.broadcast(exception)
+    if exception is not None:
+        raise CheckpointException("failed to prepare storage", {coordinator_rank : exception})
 
     rank_write_error: Optional[BaseException]
+    # FIXME error handling is wrong here (it must be around each collective)
     try:
-        (
-            metadata,
-            bytes_write_requests,
-            tensor_write_requests,
-        ) = _prepare(state_dict, is_coordinator, process_group)
+        local_plan = planner.create_local_plan(state_dict, is_coordinator)
+        local_plan = storage_writer.prepare_local_plan(local_plan)
 
-        combined_writes: List[Union[TensorWriteRequest, BytesWriteRequest]] = []
-        combined_writes.extend(tensor_write_requests)
-        combined_writes.extend(bytes_write_requests)
+        all_local_plans: List[LocalPlan]
+        all_local_plans = distW.gather(local_plan)
 
-        storage_writer.prepare_storage(combined_writes)
-        bytes_futures = storage_writer.write_bytes(bytes_write_requests)
-        tensor_futures = storage_writer.write_tensors(tensor_write_requests)
-        torch.futures.wait_all([bytes_futures, tensor_futures])
-        rank_write_error = None
-    except BaseException as e:
-        rank_write_error = e
+        if is_coordinator:
+            all_local_plans = planner.create_global_plan(all_local_plans)
+            global_plan_reply = storage_writer.prepare_global_plan(all_local_plans)
+        else:
+            global_plan_reply = None
 
-    all_errors: List[Optional[BaseException]]
-    # collect all write errors
-    if not no_dist:
-        all_errors = [None] * dist.get_world_size(process_group)
-        dist.gather_object(
-            obj=rank_write_error,
-            object_gather_list=all_errors if is_coordinator else None,
-            dst=coordinator_rank
+        final_local_plan = distW.scatter(global_plan_reply)
+        final_local_plan = planner.merge_plans(local_plan, final_local_plan)
+
+        tensor_write_requests, bytes_write_requests = storage_writer.prepare_writes(
+            state_dict,
+            final_local_plan,
+            planner.resolve_data
         )
-    else:
-        all_errors = [rank_write_error]
 
-    result: List[Optional[CheckpointException]] = [None]
+        all_writes = storage_writer.write_data(final_local_plan.storage_data, tensor_write_requests, bytes_write_requests)
+
+        all_writes.wait()
+        rank_write_result = all_writes.value()
+
+    except BaseException as e:
+        traceback.print_exc()
+        rank_write_result = e
+
+    # collect all write results
+    rank_write_result: Union[BaseException, List[WriteResult]]
+    all_results: List[Union[BaseException, List[WriteResult]]]
+    all_results = distW.gather(rank_write_result)
+
+    result: Optional[CheckpointException] = None
     if is_coordinator:
         message: Optional[str] = None
-        # gather produces an array of arrays, flatten it
-        if any(all_errors):
+
+        node_failures = {i: err for i, err in enumerate(all_results) if isinstance(err, BaseException)}
+
+        if len(node_failures) > 0:
             message = "Failed to write data"
         else:
             try:
+                # stich everything together and build the final metadata object
+                metadata = planner.create_checkpoint_metadata(all_results)
                 storage_writer.finish(metadata=metadata)
             except BaseException as e:
-                all_errors[coordinator_rank] = e
+                traceback.print_exc()
+                node_failures[coordinator_rank] = e
                 message = "Failed to finish checkpoint"
 
         if message is not None:
-            node_failures = {i: err for i, err in enumerate(all_errors) if err is not None}
-            result[0] = CheckpointException(message, node_failures)
+            result = CheckpointException(message, node_failures)
 
-    if not no_dist:
-        dist.broadcast_object_list(
-            result,
-            group=process_group,
-            src=coordinator_rank)
-
-    if result[0] is not None:
-        raise result[0]
+    result = distW.broadcast(result)
+    if result is not None:
+        raise result

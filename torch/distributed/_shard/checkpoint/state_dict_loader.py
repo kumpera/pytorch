@@ -1,3 +1,5 @@
+from functools import partial
+import traceback
 import io
 from typing import Any, Dict, List, Tuple, Optional, cast
 from torch.distributed._shard.metadata import ShardMetadata
@@ -16,26 +18,27 @@ from torch.distributed._shard.sharding_spec._internals import (
 )
 
 from .metadata import (
-    BytesReadRequest,
     BytesStorageMetadata,
-    ShardStorageMetadata,
-    TensorReadRequest,
     Metadata,
     ShardedTensorStorageMetadata,
+    ShardStorageMetadata,
     TensorStorageMetadata,
 )
 from .resharding import (
+    DefaultPlanner,
     _prepare_generic_tensor_read,
     _shards_get_overlap_region_wrt_saved_tensor
 )
 from .storage import (
+    BytesReadRequest,
     StorageReader,
+    TensorReadRequest,
+    Planner,
 )
-
 from .api import CheckpointException
 
+
 def _create_shard_metadata(size: torch.Size) -> ShardMetadata:
-    rank = dist.get_rank() if dist.is_initialized() else 0
     return ShardMetadata(
         shard_offsets=[0] * len(size),
         shard_sizes=list(size),
@@ -54,8 +57,20 @@ def _create_checkpoint_shard_for(storage: TensorStorageMetadata) -> ShardStorage
         storage_key=storage.storage_key,
     )
 
+class LoadPlanner:
+    def load_bytes(self, state_dict, fqn, md, stream):
+        state_dict[fqn] = torch.load(stream)
+
+    def resolve_tensor(self, fqn, md, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor
+
+    def copy_tensor(self, fqn, md, dest: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+        dest.copy_(src)
+
 def _reshard_and_prepare_read_request(
-    state_dict: Dict[str, Any], metadata_from_storage: Metadata
+    state_dict: Dict[str, Any],
+    metadata_from_storage: Metadata,
+    planner: LoadPlanner
 ) -> Tuple[List[BytesReadRequest], List[TensorReadRequest]]:
     """
     Use the loaded metadata and the current state dict to map the saved tensors to current tensor
@@ -67,16 +82,16 @@ def _reshard_and_prepare_read_request(
         if isinstance(obj, ShardedTensor):
             local_shards = obj.local_shards()
         elif isinstance(obj, torch.Tensor):
-            local_shards = [_create_shard_for(obj)]
+            tensor = obj.detach()
+            local_shards = [_create_shard_for(tensor)]
         else:
             if isinstance(md, BytesStorageMetadata):
-                bytes_io = io.BytesIO()
-                brr = BytesReadRequest(
-                    bytes=bytes_io,
-                    storage_key=md.storage_key,
-                    fqn=fqn
+                byte_req = BytesReadRequest(
+                    fqn=fqn,
+                    meta=md,
+                    copy=partial(planner.load_bytes, state_dict, fqn, md)
                 )
-                bytes_read_requests.append(brr)
+                bytes_read_requests.append(byte_req)
             else:
                 raise ValueError(
                     f"Invalid checkpoint metadata for {fqn}, " +
@@ -85,28 +100,36 @@ def _reshard_and_prepare_read_request(
             continue
 
         if isinstance(md, ShardedTensorStorageMetadata):
-            checkpoint_shards = md.storage_metadata
+            checkpoint_shards = [
+                (smd.shard_metadata, smd) for smd in md.shards
+            ]
         elif isinstance(md, TensorStorageMetadata):
-            checkpoint_shards = [_create_checkpoint_shard_for(md)]
+            checkpoint_shards = [
+                (_create_shard_metadata(md.info.size, "cpu"), md)    
+            ]
         else:
             raise ValueError(
                 f"Invalid checkpoint metadata for {fqn}, " +
                 f"expected TensorStorageMetadata but found {type(md)}"
             )
 
-        tensor_read_requests += _prepare_generic_tensor_read(checkpoint_shards, local_shards)
 
-
+        tensor_read_requests += _prepare_generic_tensor_read(
+            fqn,
+            checkpoint_shards,
+            local_shards,
+            planner.resolve_tensor,
+            planner.copy_tensor)
 
     return (bytes_read_requests, tensor_read_requests)
-
 
 def load_state_dict(
     state_dict: Dict[str, Any],
     storage_reader: StorageReader,
     process_group: Optional[dist.ProcessGroup] = None,
     coordinator_rank: int = 0,
-    no_dist: bool = False
+    no_dist: bool = False,
+    planner: LoadPlanner = None
 ) -> None:
     """
     Load a distributed state_dict in SPMD style.
@@ -165,28 +188,26 @@ def load_state_dict(
         has an individual GPU, via ``torch.cuda.set_device()``
     """
     is_coordinator = no_dist or dist.get_rank(process_group) == coordinator_rank
+    if planner is None:
+        planner = LoadPlanner()
 
     try:
         metadata = storage_reader.read_metadata()
+        # load_plan = planner.create_load_plan(state_dict, metadata)
+
         bytes_read_requests, tensor_read_requests = _reshard_and_prepare_read_request(
-            state_dict=state_dict, metadata_from_storage=metadata
+            state_dict=state_dict,
+            metadata_from_storage=metadata,
+            planner=planner
         )
         bytes_futures = storage_reader.read_bytes(bytes_read_requests)
         tensor_futures = storage_reader.read_tensors(tensor_read_requests)
 
         bytes_futures.wait()
-
-        # Addtional steps are required to convert the bytes to its original type
-        # Note that this is NOT inplace,
-        # it creating a new object and replace what's in the state dict
-        for req in bytes_read_requests:
-            # Ensure the BytesIO is rewound
-            req.bytes.seek(0)
-            state_dict[req.fqn] = torch.load(req.bytes)
-
         tensor_futures.wait()
         result = None
     except BaseException as e:
+        traceback.print_exc()
         result = e
 
     global_result: Optional[CheckpointException] = None
@@ -216,12 +237,12 @@ def _validate_sharded_tensor(
     # To ensure a checkpoint can satisfy loading a ST, we compute the loading
     # plans for all shards and see if they are doable.
     validate_non_overlapping_shards_metadata(
-        checkpoint_md.tensor_metadata.shards_metadata
+        [s.shard_metadata for s in checkpoint_md.shards]
     )
 
     for shard_md in tensor_md.shards_metadata:
         read_volume = 0
-        for storage_md in checkpoint_md.storage_metadata:
+        for storage_md in checkpoint_md.shards:
             shard_md_from_storage = storage_md.shard_metadata
 
             if not _check_shard_metadata_pair_overlap(shard_md, shard_md_from_storage):
@@ -240,7 +261,7 @@ def _validate_sharded_tensor(
         if read_volume != shard_volume:
             raise ValueError(
                 f"Shard {shard_md} only has {read_volume} available" +
-                "elements but needs {shard_volume}"
+                f" elements but needs {shard_volume}"
             )
 
 def validate_metadata(
@@ -279,8 +300,8 @@ def validate_metadata(
                 raise ValueError(f"{fqn}: Expected ShardedTensorStorageMetadata but found: {type(md)}")
 
             # Check if the overall ShardedTensor size is the same. Individual shards don't matter as we can reshard.
-            md_size = list(md.tensor_metadata.size)
-            tensor_size = list(obj.metadata().size)
+            md_size = md.size
+            tensor_size = obj.metadata().size
             if md_size != tensor_size:
                 raise ValueError(
                     f"{fqn}: Incompatible ShardedTensor size: expectected {tensor_size} but found {md_size}"

@@ -1,13 +1,17 @@
 from .metadata import (
-    BytesReadRequest,
-    BytesWriteRequest,
     ShardedTensorMetadata,
     ShardStorageMetadata,
     TensorStorageMetadata,
     Metadata,
+)   
+
+from .storage import (
+    BytesReadRequest,
+    BytesWriteRequest,
     TensorReadRequest,
     TensorWriteRequest,
 )
+
 from .state_dict_loader import load_state_dict
 from .state_dict_saver import save_state_dict
 from .storage import StorageReader, StorageWriter
