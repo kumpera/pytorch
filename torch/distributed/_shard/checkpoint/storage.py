@@ -1,15 +1,212 @@
 import abc
-from typing import List, Union
+from dataclasses import dataclass
+from typing import List, Union, Any, Dict, Callable, Tuple, Optional, cast
 
+import torch
+import io
 from torch.futures import Future
 
 from .metadata import (
-    BytesReadRequest,
-    BytesWriteRequest,
+    BytesStorageMetadata,
     Metadata,
-    TensorReadRequest,
-    TensorWriteRequest,
+    BytesIOProperties,
+    ShardStorageMetadata,
+    TensorInfo,
+    TensorStorageMetadata,
 )
+
+from torch.distributed._shard.sharded_tensor import (
+    ShardMetadata
+)
+
+@dataclass
+class WriteItem:
+    fqn: str
+    meta: Union[Tuple[ShardMetadata, TensorInfo], TensorInfo, BytesIOProperties]
+    storage_data: Any = None
+    planner_data: Any = None
+
+    @property
+    def is_shard(self):
+        return isinstance(self.meta, Tuple)
+
+    @property
+    def is_tensor(self):
+        return isinstance(self.meta, TensorInfo)
+
+    @property
+    def is_bytesio(self):
+        return isinstance(self.meta, BytesIOProperties)
+
+    def lookup(self, state_dict: Dict[str, Any]) -> Any:
+        obj = state_dict[self.fqn]
+        if not self.is_shard:
+            return obj
+
+        for shard in obj.local_shards():
+            if shard.metadata == self.meta[0]:
+                return shard.tensor
+        raise ValueError(f"could not find shard '{self.meta[0]}' for FQN: '{self.fqn}'")
+
+@dataclass
+class LocalPlan:
+    items: List[WriteItem]
+    storage_data: Any
+
+
+STATE_DICT_TYPE = Dict[str, Any]
+RESOLVE_WI_TYPE = Callable[[WriteItem], Union[torch.Tensor, io.BytesIO]]
+RESOLVE_DATA_TYPE = Callable[[STATE_DICT_TYPE, WriteItem], Union[torch.Tensor, io.BytesIO]]
+
+
+class TensorWriteRequest:
+    def __init__(self, item: WriteItem, resolve_data: RESOLVE_WI_TYPE):
+        self._item = item
+        self._resolve = resolve_data
+        self._obj = None
+
+    @property
+    def item(self) -> WriteItem:
+        return self._item
+
+    @property
+    def tensor(self) -> torch.Tensor:
+        if self._obj is None:
+            self._obj = self._resolve(self._item)
+        return cast(torch.Tensor, self._obj)
+
+@dataclass
+class BytesWriteRequest:
+    def __init__(self, item: WriteItem, resolve_data: RESOLVE_WI_TYPE):
+        self._item = item
+        self._resolve = resolve_data
+        self._obj = None
+
+    @property
+    def item(self) -> WriteItem:
+        return self._item
+
+    @property
+    def bytes(self) -> io.BytesIO:
+        if self._obj is None:
+            self._obj = self._resolve(self._item)
+        return cast(io.BytesIO, self._obj)
+
+@dataclass
+class BytesReadRequest:
+    def __init__(
+        self,
+        fqn: str,
+        meta: BytesStorageMetadata,
+        copy
+    ):
+        self._fqn = fqn
+        self._meta = meta
+        self._copy = copy
+
+    @property
+    def fqn(self) -> str:
+        return self._fqn
+
+    @property
+    def meta(self) -> BytesStorageMetadata:
+        return self._meta
+
+    def copy(self, stream) -> Future[None]:
+        return self._copy(stream)
+
+RESOLVE_TENSOR_TYPE = Callable[[torch.Tensor], torch.Tensor]
+COPY_TENSOR_TYPE = Callable[[torch.Tensor, torch.Tensor], Future[None]]
+
+class TensorReadRequest:
+    def __init__(
+        self,
+        fqn: str,
+        meta: Union[TensorStorageMetadata, ShardStorageMetadata],
+        tensor: torch.Tensor,
+        offsets: Tuple[int, ...],
+        lengths: Tuple[int, ...],
+        resolve: RESOLVE_TENSOR_TYPE,
+        copy: COPY_TENSOR_TYPE
+    ):
+        self._fqn = fqn
+        self._meta = meta
+        self._tensor = tensor
+        self._offsets = offsets
+        self._lengths = lengths
+        self._resolve = resolve
+        self._copy = copy
+
+    @property
+    def fqn(self) -> str:
+        return self._fqn
+
+    @property
+    def offsets(self) -> str:
+        return self._offsets
+
+    @property
+    def lengths(self) -> str:
+        return self._lengths
+
+    @property
+    def meta(self) -> Union[TensorStorageMetadata, ShardStorageMetadata]:
+        return self._meta
+
+    @property
+    def target_device(self) -> torch.device:
+        return self._tensor.device
+
+    def resolve(self, tensor: torch.Tensor) -> torch.Tensor:
+        return self._resolve(tensor)
+
+    def copy(self, data: torch.Tensor) -> Optional[Future[None]]:
+        # FIXME maybe this has no place here
+        assert (
+            data.size() == self._tensor.size()
+        ), f"req {self._fqn} mismatch sizes {data.size()} vs {self._tensor.size()}"
+
+        assert (
+            data.device == self._tensor.device
+        ), f"req {self.fqn} mismatch devices: {data.device} vs {self._tensor.target_device}"
+
+        return self._copy(self._tensor, data)
+
+@dataclass
+class WriteResult:
+    fqn: str
+    meta: Union[Tuple[ShardMetadata, TensorInfo], TensorInfo, BytesIOProperties]
+    planner_data: Any
+    storage_data: Any
+
+    @classmethod
+    def from_write_item(cls, item: WriteItem, storage: Any):
+        return WriteResult(item.fqn, item.meta, item.planner_data, storage)
+
+class Planner(abc.ABC):
+    @abc.abstractmethod
+    def create_local_plan(self, state_dict: Dict[str, Any], is_coordinator: bool) -> LocalPlan:
+        pass
+
+    @abc.abstractmethod
+    def create_global_plan(self, all_plans: List[LocalPlan]) -> List[LocalPlan]:
+        pass
+
+    @abc.abstractmethod
+    def merge_plans(self, original_plan: LocalPlan, new_plan: LocalPlan) -> LocalPlan:
+        pass
+
+    @abc.abstractmethod
+    def create_checkpoint_metadata(self, all_results: List[Union[BaseException, List[WriteResult]]]) -> Metadata:
+        pass
+
+    @abc.abstractmethod
+    def resolve_data(self, state_dict: Dict[str, Any], write_item: WriteItem) -> Union[torch.Tensor, io.BytesIO]:
+        """
+        Lookup the object from the state_dict and apply any transformation prior to storage.
+        
+        """
+        pass
 
 class StorageWriter(abc.ABC):
     """
@@ -27,9 +224,25 @@ class StorageWriter(abc.ABC):
     There's a single process that executes methods that are called once globally.
     The writes from (3) and (4) are initiated before any waiting is done.
     The last call to finish() has the semantics of commiting the checkpoint.
-
-
     """
+
+    @abc.abstractmethod
+    def prepare_local_plan(self, plan: LocalPlan) -> LocalPlan:
+        pass
+
+    @abc.abstractmethod
+    def prepare_global_plan(self, plans: List[LocalPlan]) -> List[LocalPlan]:
+        pass
+
+    @abc.abstractmethod
+    def prepare_writes(
+        self,
+        state_dict: Dict[str, Any],
+        plan: LocalPlan,
+        resolve_data: RESOLVE_DATA_TYPE,
+    ) -> Tuple[List[TensorWriteRequest], List[BytesWriteRequest]]:
+        pass
+
     @abc.abstractmethod
     def prepare(self) -> None:
         """
@@ -45,22 +258,12 @@ class StorageWriter(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def write_bytes(self, requests: List[BytesWriteRequest]) -> Future[None]:
-        """
-        Initiate writes for all requests in `requests`.
-
-        Writing can happen asynchronously and/or concurrently. A blocking
-        implementation is valid.
-
-        Args:
-            requests (List[BytesWriteRequest]): A list of requests to write
-        Returns:
-            A future that completes once all writes have finished.
-        """
-        pass
-
-    @abc.abstractmethod
-    def write_tensors(self, requests: List[TensorWriteRequest]) -> Future[None]:
+    def write_data(
+        self,
+        storage_plan: Any,
+        tensors: List[TensorWriteRequest],
+        bytes: List[BytesWriteRequest]
+    ) -> Future[List[WriteResult]]:
         """
         Initiate writes for all requests in `requests`.
 
