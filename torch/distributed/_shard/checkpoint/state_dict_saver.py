@@ -78,7 +78,7 @@ global_plan (coordinator)
 finalize_plan: (all ranks)
     planner.merge_plan(local, global) -> storage.prepare_writes -> write requests
 
-write time:( all ranks)
+write: (all ranks)
     storage.write_data -> [WriteResult]
 
 finish: (coordinator)
@@ -110,7 +110,12 @@ read: (all ranks)
 
 
 Notes:
-    Should we pass Planners around or functions? 
+    Should we pass Planners around or functions?
+
+    Should we introduce a similar protocol to save:
+        local plan -> global plan -> merge -> execute
+    This could enable things like read
+    
 
 """
 def save_state_dict(
