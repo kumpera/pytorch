@@ -52,6 +52,7 @@ class WriteItem:
 class LocalPlan:
     items: List[WriteItem]
     storage_data: Any
+    planner_data: Any
 
 
 STATE_DICT_TYPE = Dict[str, Any]
@@ -235,23 +236,34 @@ class StorageWriter(abc.ABC):
     A subclass should expect the following sequence of calls by ``save_state_dict``
 
     1) (called once globally) prepare()
-    2) prepare_storage() with the writes that will be used with (3) and (4).
-    3) write_bytes
-    4) write_tensors.
-    5) Wait for (2) and (3) futures. If either fail, abort checkpoint.
+    2) prepare_local_plan()
+    3) (called once globally) prepare_global_plan.
+    4) prepare_writes()
+    5) write_data()
     6) (called once globally) finish().
 
     There's a single process that executes methods that are called once globally.
-    The writes from (3) and (4) are initiated before any waiting is done.
-    The last call to finish() has the semantics of commiting the checkpoint.
     """
 
     @abc.abstractmethod
     def prepare_local_plan(self, plan: LocalPlan) -> LocalPlan:
+        """
+        Add storage specific data to the plan.
+
+        While this method can produce a completely different plan, the prefered
+        way is to store storage specific data in LocalPlan::storage_data and WriteItem::storage_data.
+        """
         pass
 
     @abc.abstractmethod
     def prepare_global_plan(self, plans: List[LocalPlan]) -> List[LocalPlan]:
+        """
+        Set storage specific data to the global plan.
+
+
+        While this method can produce a completely different plan, the prefered
+        way is to store storage specific data in LocalPlan::storage_data and WriteItem::storage_data.
+        """
         pass
 
     @abc.abstractmethod
@@ -261,6 +273,9 @@ class StorageWriter(abc.ABC):
         plan: LocalPlan,
         resolve_data: RESOLVE_DATA_TYPE,
     ) -> Tuple[List[TensorWriteRequest], List[BytesWriteRequest]]:
+        """
+        Produce writes to satisfy those requested in ``plan``.
+        """
         pass
 
     @abc.abstractmethod
