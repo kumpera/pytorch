@@ -186,25 +186,45 @@ class WriteResult:
 class Planner(abc.ABC):
     @abc.abstractmethod
     def create_local_plan(self, state_dict: Dict[str, Any], is_coordinator: bool) -> LocalPlan:
+        """
+        Compute the save plan for the current rank. This will be aggregated and fed into create_global_plan
+        so any inputs for global planning should be returned from here.
+
+        This is called on all ranks.
+        """ 
         pass
 
     @abc.abstractmethod
     def create_global_plan(self, all_plans: List[LocalPlan]) -> List[LocalPlan]:
+        """
+        Compute the global checkpoint plan and return the local plan of each rank.
+
+        This is called on the coordinator rank only.
+        """
         pass
 
     @abc.abstractmethod
     def merge_plans(self, original_plan: LocalPlan, new_plan: LocalPlan) -> LocalPlan:
+        """
+        Merge the plan created by `create_local_plan` and the result of `create_global_plan`.
+
+        This is called on all ranks.
+        """
         pass
 
     @abc.abstractmethod
-    def create_checkpoint_metadata(self, all_results: List[Union[BaseException, List[WriteResult]]]) -> Metadata:
+    def create_checkpoint_metadata(self, all_results: List[List[WriteResult]]) -> Metadata:
+        """
+        Create the checkpoint global metadata. This is usually just aggregating all results.
+        """
+
         pass
 
     @abc.abstractmethod
     def resolve_data(self, state_dict: Dict[str, Any], write_item: WriteItem) -> Union[torch.Tensor, io.BytesIO]:
         """
-        Lookup the object from the state_dict and apply any transformation prior to storage.
-        
+        Lookup the object associated with ``write_item``in `state_dict` and apply any
+        transformation (such as serialization) prior to the IO layer consuming it.
         """
         pass
 
