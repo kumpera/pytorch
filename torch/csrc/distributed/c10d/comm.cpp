@@ -20,11 +20,11 @@ class BroadcastWork {
         flat_tensor_({torch::utils::flatten_dense_tensors(bucket_tensors_)}) {
     BroadcastOptions broadcastOptions;
     broadcastOptions.rootRank = root_rank;
-    work_ = process_group->broadcast(flat_tensor_, broadcastOptions);
+    future_ = process_group->broadcast(flat_tensor_, broadcastOptions)->getFuture();
   }
 
   void finish() {
-    work_->wait();
+    future_->wait();
 
     // Copy the output of the broadcast operation back.
     auto output_tensors = torch::utils::unflatten_dense_tensors(
@@ -46,8 +46,8 @@ class BroadcastWork {
   std::vector<at::Tensor> flat_tensor_;
 
  private:
-  // The broadcast work that is kicked off upon construction.
-  c10::intrusive_ptr<c10d::ProcessGroup::Work> work_;
+  // The broadcast future that is kicked off upon construction.
+  c10::intrusive_ptr<c10::ivalue::Future> future_;
 };
 
 } // namespace
