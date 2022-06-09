@@ -69,6 +69,25 @@ class CpuTimer : public Timer {
 
 C10_REGISTER_TYPED_CLASS(TimerRegistry, c10::kCPU, CpuTimer);
 
+
+std::vector<at::Tensor> extractTensors(const c10::IValue& result)
+{
+  if (result.isPyObject()) {
+    return result.toPyObjectHolder()->extractTensors();
+  }
+  TORCH_INTERNAL_ASSERT(
+      result.isTensor() || result.isTensorList(),
+      "expected the hook result is either a Tensor or a TensorList found ",
+      result.tagKind());
+
+  if (result.isTensor()) {
+    return {result.toTensor()};
+  }
+
+  return result.toTensorVector();
+}
+
+
 } // namespace
 
 Reducer::Reducer(
@@ -462,7 +481,7 @@ std::vector<c10d::GradBucket> Reducer::get_grad_buckets(
 }
 
 void Reducer::set_forward_pass_work_handle(
-    c10::intrusive_ptr<c10d::ProcessGroup::Work> forwardPassWorkHandle,
+    c10::intrusive_ptr<c10::ivalue::Future> forwardPassWorkHandle,
     bool useStaticWorldSize) {
   std::lock_guard<std::mutex> lock(mutex_);
   forwardPassWorkHandle_.workHandle = std::move(forwardPassWorkHandle);
@@ -498,7 +517,7 @@ void Reducer::set_divide_factor() {
     auto& workHandle = forwardPassWorkHandle_.workHandle;
     if (workHandle && !forwardPassWorkHandle_.useStaticWorldSize) {
       workHandle->wait();
-      auto results = workHandle->result();
+      auto results = extractTensors(workHandle->value());
       // Guard against the results being empty
       TORCH_INTERNAL_ASSERT(results.size() > 0);
       at::Tensor& res = results.front();
@@ -682,7 +701,7 @@ void Reducer::all_reduce_local_used_map() {
     local_used_map_dev_.copy_(local_used_map_, true);
   }
   std::vector<at::Tensor> temp_local_used_map_dev_vec_ = {local_used_map_dev_};
-  local_used_work_ = process_group_->allreduce(temp_local_used_map_dev_vec_);
+  local_used_work_ = process_group_->allreduce(temp_local_used_map_dev_vec_)->getFuture();
 }
 
 at::Tensor& Reducer::get_param_from_index(size_t index) {
