@@ -186,4 +186,47 @@ void ProcessGroup::init() {
   C10_LOG_API_USAGE_ONCE(fmt::format("c10d.process_group_{}", getBackendName()));
 }
 
+
+FutureWrappingWork::FutureWrappingWork(c10::intrusive_ptr<c10::ivalue::Future> fut): Work(), _fut(fut) {}
+FutureWrappingWork::~FutureWrappingWork() {
+}
+
+bool FutureWrappingWork::isCompleted() {
+  return _fut->completed();
+}
+
+bool FutureWrappingWork::isSuccess() const {
+  return _fut->hasValue();
+}
+
+std::exception_ptr FutureWrappingWork::exception() const {
+  return _fut->exception_ptr();
+}
+
+// Returns source rank if this objects represents a recv-from-any.
+int FutureWrappingWork::sourceRank() const  {
+  TORCH_CHECK(false, "Cannot sourceRank FutureWrappingWork!");
+}
+
+std::vector<at::Tensor> FutureWrappingWork::result() {
+  return _fut->value().toPyObjectHolder()->extractTensors();
+}
+
+void FutureWrappingWork::synchronize() {
+  TORCH_CHECK(false, "Cannot synchronize FutureWrappingWork!");
+}
+
+bool FutureWrappingWork::wait(std::chrono::milliseconds timeout) {
+  _fut->wait(); /* FIXME */
+  return true;
+}
+
+void FutureWrappingWork::abort() {
+  TORCH_CHECK(false, "Cannot abort FutureWrappingWork!");
+}
+
+c10::intrusive_ptr<c10::ivalue::Future> FutureWrappingWork::getFuture() {
+  return _fut;
+}
+
 } // namespace c10d

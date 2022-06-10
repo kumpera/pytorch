@@ -1571,6 +1571,16 @@ Example::
                        respective GPUs (similarly to GPU work).
            )");
 
+  py::class_<::c10d::FutureWrappingWork,
+             ::c10d::ProcessGroup::Work,
+             c10::intrusive_ptr<::c10d::FutureWrappingWork>>(module, "FutureWrappingWork")
+      .def(
+          py::init([](const std::shared_ptr<jit::PythonFutureWrapper>& future) {
+            return c10::make_intrusive<::c10d::FutureWrappingWork>(future->fut);
+          }),
+          py::arg("future"),
+          py::call_guard<py::gil_scoped_release>());
+
   py::class_<c10::DDPLoggingData>(module, "DDPLoggingData")
       .def(py::init<>())
       .def_readwrite("strs_map", &c10::DDPLoggingData::strs_map)
