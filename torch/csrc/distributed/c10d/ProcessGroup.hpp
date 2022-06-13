@@ -149,6 +149,8 @@ class TORCH_API ProcessGroup : public torch::CustomClassHolder {
 
     OpType retrieveOpType();
 
+    static c10::intrusive_ptr<Work> create_from_future(c10::intrusive_ptr<c10::ivalue::Future>);
+
    protected:
     // Completes the work object and optionally sets the exception in a
     // thread-safe manner. Notifies all waiting condition variables as well.
@@ -439,23 +441,5 @@ class TORCH_API ProcessGroup : public torch::CustomClassHolder {
   // remains the same across use of this process group.
   DebugLevel dist_debug_level_;
 };
-
-
-class TORCH_API FutureWrappingWork : public ProcessGroup::Work {
-   public:
-    FutureWrappingWork(c10::intrusive_ptr<c10::ivalue::Future> fut);
-    virtual ~FutureWrappingWork();
-    bool isCompleted() override;
-    bool isSuccess() const override;
-    std::exception_ptr exception() const override;
-    int sourceRank() const override;
-    std::vector<at::Tensor> result() override;
-    void synchronize() override;
-    bool wait(std::chrono::milliseconds timeout);
-    void abort() override;
-    c10::intrusive_ptr<c10::ivalue::Future> getFuture() override;
-  private:
-    c10::intrusive_ptr<c10::ivalue::Future> _fut;
-  };
 
 } // namespace c10d

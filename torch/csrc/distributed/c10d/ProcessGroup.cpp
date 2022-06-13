@@ -187,46 +187,55 @@ void ProcessGroup::init() {
 }
 
 
-FutureWrappingWork::FutureWrappingWork(c10::intrusive_ptr<c10::ivalue::Future> fut): Work(), _fut(fut) {}
-FutureWrappingWork::~FutureWrappingWork() {
-}
+class FutureWrappingWork : public ProcessGroup::Work {
+public:
+  FutureWrappingWork(c10::intrusive_ptr<c10::ivalue::Future> fut):
+    Work(), _fut(fut) {
+  }
 
-bool FutureWrappingWork::isCompleted() {
-  return _fut->completed();
-}
+  ~FutureWrappingWork() {
+  }
 
-bool FutureWrappingWork::isSuccess() const {
-  return _fut->hasValue();
-}
+  bool isCompleted() override {
+    return _fut->completed();
+  }
 
-std::exception_ptr FutureWrappingWork::exception() const {
-  return _fut->exception_ptr();
-}
+  bool isSuccess() const override {
+    return _fut->hasValue();
+  }
 
-// Returns source rank if this objects represents a recv-from-any.
-int FutureWrappingWork::sourceRank() const  {
-  TORCH_CHECK(false, "Cannot sourceRank FutureWrappingWork!");
-}
+  std::exception_ptr exception() const override {
+    return _fut->exception_ptr();
+  }
 
-std::vector<at::Tensor> FutureWrappingWork::result() {
-  return _fut->value().toPyObjectHolder()->extractTensors();
-}
+  // Returns source rank if this objects represents a recv-from-any.
+  int sourceRank() const override {
+    TORCH_CHECK(false, "Cannot sourceRank FutureWrappingWork!");
+  }
 
-void FutureWrappingWork::synchronize() {
-  TORCH_CHECK(false, "Cannot synchronize FutureWrappingWork!");
-}
+  std::vector<at::Tensor> result() override {
+    return _fut->value().toPyObjectHolder()->extractTensors();
+  }
 
-bool FutureWrappingWork::wait(std::chrono::milliseconds timeout) {
-  _fut->wait(); /* FIXME */
-  return true;
-}
+  bool wait(std::chrono::milliseconds timeout) override {
+    _fut->wait(); /* FIXME */
+    return true;
+  }
 
-void FutureWrappingWork::abort() {
-  TORCH_CHECK(false, "Cannot abort FutureWrappingWork!");
-}
+  void abort() override {
+    TORCH_CHECK(false, "Cannot abort FutureWrappingWork!");
+  }
 
-c10::intrusive_ptr<c10::ivalue::Future> FutureWrappingWork::getFuture() {
-  return _fut;
+  c10::intrusive_ptr<c10::ivalue::Future> getFuture() override {
+    return _fut;
+  }
+
+private:
+  c10::intrusive_ptr<c10::ivalue::Future> _fut;
+};
+
+c10::intrusive_ptr<ProcessGroup::Work> ProcessGroup::Work::create_from_future(c10::intrusive_ptr<c10::ivalue::Future> future) {
+  return c10::make_intrusive<FutureWrappingWork>(future);
 }
 
 } // namespace c10d
