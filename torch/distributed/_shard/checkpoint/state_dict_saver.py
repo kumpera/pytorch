@@ -180,78 +180,37 @@ def save_state_dict(
     if planner is None:
         planner = DefaultPlanner()
 
-    exception: Optional[BaseException] = None
-    if is_coordinator:
-        try:
-            storage_writer.prepare()
-        except BaseException as e:
-            traceback.print_exc()
-            exception = e
+    _ = distW.run_on_coordinator("prepare storage", storage_writer.prepare)
 
-    # Writing can only start once prepare has finished
-    exception = distW.broadcast(exception)
-    if exception is not None:
-        raise CheckpointException("failed to prepare storage", {coordinator_rank : exception})
-
-    rank_write_error: Optional[BaseException]
-    # FIXME error handling is wrong here (it must be around each collective)
-    try:
+    def local_step():
         local_plan = planner.create_local_plan(state_dict, is_coordinator)
         local_plan = storage_writer.prepare_local_plan(local_plan)
+        return local_plan
+    
+    def global_step(all_local_plans):
+        all_local_plans = planner.create_global_plan(all_local_plans)
+        all_local_plans = storage_writer.prepare_global_plan(all_local_plans)
+        return all_local_plans
 
-        all_local_plans: List[LocalPlan]
-        all_local_plans = distW.gather(local_plan)
+    local_plan, central_plan = distW.map_scatter("plan", local_step, global_step)
 
-        if is_coordinator:
-            all_local_plans = planner.create_global_plan(all_local_plans)
-            global_plan_reply = storage_writer.prepare_global_plan(all_local_plans)
-        else:
-            global_plan_reply = None
-
-        final_local_plan = distW.scatter(global_plan_reply)
-        final_local_plan = planner.merge_plans(local_plan, final_local_plan)
-
+    def write_data():
+        final_local_plan = planner.merge_plans(local_plan, central_plan)
         tensor_write_requests, bytes_write_requests = storage_writer.prepare_writes(
             state_dict,
             final_local_plan,
             planner.resolve_data
         )
-
         all_writes = storage_writer.write_data(final_local_plan.storage_data, tensor_write_requests, bytes_write_requests)
 
         all_writes.wait()
-        rank_write_result = all_writes.value()
+        return all_writes.value()
 
-    except BaseException as e:
-        traceback.print_exc()
-        rank_write_result = e
+    def finish_checkpoint(all_results):
+        metadata = planner.create_checkpoint_metadata(all_results)
+        storage_writer.finish(metadata=metadata)
+        # XXX do we return some sort of storage/planner result?
+        return None
 
-    # collect all write results
-    rank_write_result: Union[BaseException, List[WriteResult]]
-    all_results: List[Union[BaseException, List[WriteResult]]]
-    all_results = distW.gather(rank_write_result)
+    _ = distW.map_reduce("write", write_data, finish_checkpoint)
 
-    result: Optional[CheckpointException] = None
-    if is_coordinator:
-        message: Optional[str] = None
-
-        node_failures = {i: err for i, err in enumerate(all_results) if isinstance(err, BaseException)}
-
-        if len(node_failures) > 0:
-            message = "Failed to write data"
-        else:
-            try:
-                # stich everything together and build the final metadata object
-                metadata = planner.create_checkpoint_metadata(all_results)
-                storage_writer.finish(metadata=metadata)
-            except BaseException as e:
-                traceback.print_exc()
-                node_failures[coordinator_rank] = e
-                message = "Failed to finish checkpoint"
-
-        if message is not None:
-            result = CheckpointException(message, node_failures)
-
-    result = distW.broadcast(result)
-    if result is not None:
-        raise result

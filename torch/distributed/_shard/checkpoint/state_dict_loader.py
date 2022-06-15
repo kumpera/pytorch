@@ -25,7 +25,7 @@ from .metadata import (
     TensorStorageMetadata,
 )
 from .resharding import (
-    DefaultPlanner,
+    DefaultLoadPlanner,
     _prepare_generic_tensor_read,
     _shards_get_overlap_region_wrt_saved_tensor
 )
@@ -34,7 +34,11 @@ from .storage import (
     StorageReader,
     TensorReadRequest,
     Planner,
+    LoadPlanner,
+    LoadPlan,
+    ReadItem
 )
+from .utils import DistWrapper
 from .api import CheckpointException
 
 
@@ -56,16 +60,6 @@ def _create_checkpoint_shard_for(storage: TensorStorageMetadata) -> ShardStorage
         shard_metadata=_create_shard_metadata(storage.size),
         storage_key=storage.storage_key,
     )
-
-class LoadPlanner:
-    def load_bytes(self, state_dict, fqn, md, stream):
-        state_dict[fqn] = torch.load(stream)
-
-    def resolve_tensor(self, fqn, md, tensor: torch.Tensor) -> torch.Tensor:
-        return tensor
-
-    def copy_tensor(self, fqn, md, dest: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
-        dest.copy_(src)
 
 def _reshard_and_prepare_read_request(
     state_dict: Dict[str, Any],
@@ -188,45 +182,36 @@ def load_state_dict(
         has an individual GPU, via ``torch.cuda.set_device()``
     """
     is_coordinator = no_dist or dist.get_rank(process_group) == coordinator_rank
+    distW = DistWrapper(process_group, not no_dist, coordinator_rank)
+
     if planner is None:
-        planner = LoadPlanner()
+        planner = DefaultLoadPlanner()
 
-    try:
-        metadata = storage_reader.read_metadata()
-        # load_plan = planner.create_load_plan(state_dict, metadata)
+    def local_step():
+        local_plan = planner.create_local_plan(state_dict, is_coordinator)
+        local_plan = storage_reader.prepare_local_plan(local_plan)
+        return local_plan
+    
+    def global_step(all_local_plans):
+        all_local_plans = planner.create_global_plan(all_local_plans)
+        all_local_plans = storage_reader.prepare_global_plan(all_local_plans)
+        return all_local_plans
 
-        bytes_read_requests, tensor_read_requests = _reshard_and_prepare_read_request(
-            state_dict=state_dict,
-            metadata_from_storage=metadata,
-            planner=planner
+    local_plan, central_plan = distW.map_scatter("plan", local_step, global_step)
+
+    def read_data():
+        final_local_plan = planner.merge_plans(local_plan, central_plan)
+        bytes_read_requests, tensor_read_requests = storage_reader.prepare_reads(
+            state_dict,
+            final_local_plan,
         )
-        bytes_futures = storage_reader.read_bytes(bytes_read_requests)
-        tensor_futures = storage_reader.read_tensors(tensor_read_requests)
 
-        bytes_futures.wait()
-        tensor_futures.wait()
-        result = None
-    except BaseException as e:
-        traceback.print_exc()
-        result = e
+        all_reads = storage_reader.read_data(final_local_plan.storage_data, bytes_read_requests, tensor_read_requests)
 
-    global_result: Optional[CheckpointException] = None
-    if not no_dist:
-        all_errors = [None] * dist.get_world_size(process_group)
+        all_reads.wait()
+        return None
 
-        dist.all_gather_object(
-            object_list=all_errors,
-            obj=result,
-            group=process_group)
-
-        node_failures = cast(Dict[int, BaseException], {i: err for i, err in enumerate(all_errors) if err is not None})
-        if len(node_failures) > 0:
-            global_result = CheckpointException("failed to read checkpoint", node_failures)
-    elif result is not None:
-        global_result = CheckpointException("failed to read storage", {coordinator_rank : result})
-
-    if global_result is not None:
-        raise global_result
+    distW.run_on_all_ranks("read", read_data)
 
 
 def _validate_sharded_tensor(
