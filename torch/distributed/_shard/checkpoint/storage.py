@@ -18,6 +18,43 @@ from .metadata import (
 from torch.distributed._shard.sharded_tensor import (
     ShardMetadata
 )
+""""
+Notes on design issues:
+
+We need to resurface the prepare_xxx_ functions
+Can we unify WriteItem with ReadItem? Can we unity LocalPlan / LoadPlan?
+How about the planning phase?
+The way shard MD is defined in WriteItem is bad.
+
+There's a layer complexity/confusion going on the read side:
+On the write side, the planner picks stuff from the state_dict and handle that to the storage layer to figure out how to write each of them.
+
+On the read side, there's little for the planner itself to do beyond handling any transforms done by the write planner.
+
+What sort of scenarios need a central read plan?
+    One case that's reasonable but hard to deal with is to reduce read applification
+    when resharding.
+
+There's this odd separation of how we deserialize BytesIO and tensors.
+    Tensor is done by storage
+    bytesIO is done by Planner
+-> Fixed, all on storage
+
+Where should tensor narrowing happen?
+    Dest tensor happens in storage::prepare_reads
+    Storage tensor happens in storage::write_data
+
+We ignore lenghts/offset for BytesIO and this is something we wanna care
+
+I'm not 100% sure of prepare_reads / prepare_writes WRT passing of callbacks.
+    Maybe pass a structurally typed object that has those methods?
+
+The current design assumes storage / planner to be stateless objects.
+    Having an init method on both that we pass some global data to them.
+        Like state_dict and metadata.
+
+"""
+
 
 @dataclass
 class WriteItem:
@@ -54,6 +91,43 @@ class LocalPlan:
     storage_data: Any
     planner_data: Any
 
+
+class ReadItem:
+    fqn: str
+    meta: Union[BytesStorageMetadata, ShardStorageMetadata, TensorStorageMetadata]
+
+    # FIXME this sort of imply 
+
+    # Offset from tensor found in checkpoint metadata
+    storage_offsets: Tuple[int, ...]
+    # Offset from stored tensor
+    dest_offsets: Tuple[int, ...]
+    lengths: Tuple[int, ...]
+
+    storage_data: Any = None
+    planner_data: Any = None
+
+    @property
+    def is_shard(self):
+        return isinstance(self.meta, ShardStorageMetadata)
+
+    @property
+    def is_tensor(self):
+        return isinstance(self.meta, TensorStorageMetadata)
+
+    @property
+    def is_bytesio(self):
+        return isinstance(self.meta, BytesStorageMetadata)
+
+    def lookup(self, state_dict: Dict[str, Any]) -> Any:
+        obj = state_dict[self.fqn]
+        if not self.is_shard:
+            return obj
+
+        for shard in obj.local_shards():
+            if shard.metadata == cast(ShardStorageMetadata, self.meta).shard_metadata:
+                return shard.tensor
+        raise ValueError(f"could not find shard '{self.meta[0]}' for FQN: '{self.fqn}'")
 
 STATE_DICT_TYPE = Dict[str, Any]
 RESOLVE_WI_TYPE = Callable[[WriteItem], Union[torch.Tensor, io.BytesIO]]
@@ -97,24 +171,22 @@ class BytesWriteRequest:
 class BytesReadRequest:
     def __init__(
         self,
-        fqn: str,
-        meta: BytesStorageMetadata,
+        item: ReadItem,
         copy
     ):
-        self._fqn = fqn
-        self._meta = meta
+        self._item = item
         self._copy = copy
 
-    @property
-    def fqn(self) -> str:
-        return self._fqn
+    # @property
+    # def fqn(self) -> str:
+    #     return self.item.fqn
 
     @property
     def meta(self) -> BytesStorageMetadata:
-        return self._meta
+        return self._item.meta
 
-    def copy(self, stream) -> Future[None]:
-        return self._copy(stream)
+    def copy(self, object) -> Future[None]:
+        return self._copy(self._item, object)
 
 RESOLVE_TENSOR_TYPE = Callable[[torch.Tensor], torch.Tensor]
 COPY_TENSOR_TYPE = Callable[[torch.Tensor, torch.Tensor], Future[None]]
@@ -122,46 +194,45 @@ COPY_TENSOR_TYPE = Callable[[torch.Tensor, torch.Tensor], Future[None]]
 class TensorReadRequest:
     def __init__(
         self,
-        fqn: str,
-        meta: Union[TensorStorageMetadata, ShardStorageMetadata],
+        item: ReadItem,
         tensor: torch.Tensor,
-        offsets: Tuple[int, ...],
-        lengths: Tuple[int, ...],
-        resolve: RESOLVE_TENSOR_TYPE,
-        copy: COPY_TENSOR_TYPE
+        copy
+
+        # fqn: str,
+        # meta: Union[TensorStorageMetadata, ShardStorageMetadata],
+        # tensor: torch.Tensor,
+        # offsets: Tuple[int, ...],
+        # lengths: Tuple[int, ...],
+        # resolve: RESOLVE_TENSOR_TYPE,
+        # copy: COPY_TENSOR_TYPE
     ):
-        self._fqn = fqn
-        self._meta = meta
+        self._item = item
         self._tensor = tensor
-        self._offsets = offsets
-        self._lengths = lengths
-        self._resolve = resolve
         self._copy = copy
 
-    @property
-    def fqn(self) -> str:
-        return self._fqn
+    # @property
+    # def fqn(self) -> str:
+    #     return self.item.fqn
 
-    @property
-    def offsets(self) -> str:
-        return self._offsets
+    # @property
+    # def offsets(self) -> str:
+    #     return self._offsets
 
-    @property
-    def lengths(self) -> str:
-        return self._lengths
+    # @property
+    # def lengths(self) -> str:
+    #     return self._lengths
 
     @property
     def meta(self) -> Union[TensorStorageMetadata, ShardStorageMetadata]:
-        return self._meta
-
+        return self._item.meta
     @property
     def target_device(self) -> torch.device:
         return self._tensor.device
 
-    def resolve(self, tensor: torch.Tensor) -> torch.Tensor:
-        return self._resolve(tensor)
+    # def resolve(self, tensor: torch.Tensor) -> torch.Tensor:
+    #     return self._resolve(tensor)
 
-    def copy(self, data: torch.Tensor) -> Optional[Future[None]]:
+    def copy(self, data: torch.Tensor) -> None:
         # FIXME maybe this has no place here
         assert (
             data.size() == self._tensor.size()
@@ -171,7 +242,7 @@ class TensorReadRequest:
             data.device == self._tensor.device
         ), f"req {self.fqn} mismatch devices: {data.device} vs {self._tensor.target_device}"
 
-        return self._copy(self._tensor, data)
+        self._copy(self._tensor, data)
 
 @dataclass
 class WriteResult:
@@ -228,6 +299,35 @@ class Planner(abc.ABC):
         transformation (such as serialization) prior to the IO layer consuming it.
         """
         pass
+
+@dataclass
+class LoadPlan:
+    items: List[ReadItem]
+    storage_data: Any = None
+    planner_data: Any = None
+
+
+class LoadPlanner:
+    @abc.abstractmethod
+    def create_local_plan(self, state_dict, metadata: Metadata) -> LoadPlan:
+        pass
+
+    @abc.abstractmethod
+    def create_global_plan(self, globla_plan: List[LoadPlan]) -> List[LoadPlan]:
+        pass
+
+    @abc.abstractmethod
+    def merge_plans(self, original_plan: LoadPlan, new_plan: LoadPlan) -> LoadPlan:
+        pass
+
+    @abc.abstractmethod
+    def load_bytes(self, state_dict, wi, stream) -> None:
+        pass
+
+    @abc.abstractmethod
+    def copy_tensor(self, wi, dest: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+        pass
+
 
 class StorageWriter(abc.ABC):
     """
@@ -375,43 +475,27 @@ class StorageReader(abc.ABC):
     Implementors must ensure host/device synchronization as part of
     completion of both read requests.
     """
-
     @abc.abstractmethod
-    def read_bytes(self, requests: List[BytesReadRequest]) -> Future[None]:
-        """
-        Initiate read for all requests in `requests`.
-
-        Reading happen asynchronously and/or concurrently. A blocking
-        implementation is valid.
-
-        Args:
-            requests (List[BytesReadRequest]): A list of requests to read.
-
-        Return:
-            A future that completes once all read have finished.
-        """
+    def prepare_local_plan(self, plan: LoadPlan) -> LoadPlan:
         pass
 
     @abc.abstractmethod
-    def read_tensors(self, requests: List[TensorReadRequest]) -> Future[None]:
-        """
-        Initiate read for all requests in `requests`.
+    def prepare_global_plan(self, plans: List[LoadPlan]) -> List[LoadPlan]:
+        pass
 
-        Reading happen asynchronously and/or concurrently. A blocking
-        implementation is valid.
+    @abc.abstractmethod
+    def prepare_reads(
+        state_dict: Dict[str, Any],
+        load_plan: LoadPlan,
+    ) -> Tuple[List[BytesReadRequest], List[TensorReadRequest]]:
+        pass
 
-        Implementors must not assume that the original device
-        at write time will be the same at read time.
-
-        If an implementation uses asynchronous copies to device, it must
-        ensure proper synchronization W.R.T. the returned future.
-
-        Args:
-            requests (List[BytesReadRequest]): A list of requests to read.
-
-        Returns:
-            A future that completes once all read have finished.
-        """
+    @abc.abstractmethod
+    def read_data(self,
+        storage_plan: Any,
+        byte_requests: List[BytesReadRequest],
+        tensor_requests: List[TensorReadRequest]
+    ) -> Future[None]:
         pass
 
     @abc.abstractmethod

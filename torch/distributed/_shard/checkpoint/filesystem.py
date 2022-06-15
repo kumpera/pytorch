@@ -1,3 +1,4 @@
+import itertools
 from dataclasses import dataclass
 import os
 import io
@@ -14,6 +15,7 @@ from .metadata import (
 )
 from .storage import (
     LocalPlan,
+    LoadPlan,
     StorageReader,
     StorageWriter,
     WriteResult,
@@ -24,7 +26,12 @@ from .storage import (
     RESOLVE_DATA_TYPE
 )
 
-from .resharding import default_prepare_writes
+from .resharding import (
+    default_prepare_writes,
+    default_prepare_reads
+)
+
+from .utils import tensor_narrow_n
 
 @dataclass
 class _StorageInfo:
@@ -169,8 +176,8 @@ class FileSystemWriter(StorageWriter):
 
 
 class SlicedBufferedReader(io.BufferedReader):
-    def __init__(self, base_stream: io.BufferedReader, offset: int, len: int):
-        super().__init__(base_stream.detach())
+    def __init__(self, base_stream: io.RawIOBase, offset: int, len: int):
+        super().__init__(base_stream)
         self.offset = offset
         self.len = len
         self.seek(0)
@@ -186,70 +193,41 @@ class SlicedBufferedReader(io.BufferedReader):
     def tell(self) -> int:
         return super().tell() - self.offset
 
-def tensor_narrow_n(tensor: torch.Tensor, offsets: Tuple[int, ...], lengths: Tuple[int, ...]) -> torch.Tensor:
-    for dim, (start, length) in enumerate(zip(offsets, lengths)):
-        tensor = torch.narrow(tensor, dim, start, length)
-    return tensor
-
 class FileSystemReader(StorageReader):
     def __init__(self, path: Union[str, os.PathLike]) -> None:
         super().__init__()
         self.path = Path(path)
 
-    def _open_file(self, sinfo: _StorageInfo):
-        file = (self.path / sinfo.relative_path).open("rb")
-        return SlicedBufferedReader(file, sinfo.offset, sinfo.length)
+    def _slice_file(self, file, sinfo: _StorageInfo):
+        return SlicedBufferedReader(
+            io.FileIO(file.fileno(),closefd=False), 
+            sinfo.offset, sinfo.length
+        )
 
-    def read_tensors(
-        self,
-        requests: List[TensorReadRequest]
-        ) -> Future[None]:
-        """
-        Very basic implementation that read from file system.
-        """
-        # Sort the the requests by storage key and try to reuse the loaded tensors
-        requests.sort(key=lambda x: x.meta.storage_data.relative_path)
+    def read_data(self,
+        storage_plan: Any,
+        byte_requests: List[BytesReadRequest],
+        tensor_requests: List[TensorReadRequest]
+    ) -> Future[None]:
 
-        cached_storage_entry = None
-        view_cached: Optional[Tensor] = None
-        all_futs = []
+        # group requests by file
+        per_file = dict()
+        for br in itertools.chain(byte_requests, tensor_requests):
+            path = br.meta.storage_data.relative_path
+            per_file.setdefault(path, []).append(br)
 
-        for req in requests:
-            sinfo = cast(_StorageInfo, req.meta.storage_data)
-            if cached_storage_entry != sinfo.relative_path or \
-                    (view_cached is not None and view_cached.device != req.target_device):
-
-                with self._open_file(sinfo) as storage:
-                    view_cached = cast(Tensor, torch.load(storage, map_location=req.target_device))
-                    view_cached = req.resolve(view_cached)
-                    cached_storage_entry = sinfo.relative_path
-
-            view_to_copy: Tensor = cast(Tensor, view_cached)
-            # We need to narrow in the case of resharding
-            view_to_copy = tensor_narrow_n(view_to_copy, req.offsets, req.lengths)
-
-            res = req.copy(view_to_copy)
-            if res is not None:
-                all_futs.append(res)
-
-        if len(all_futs) > 0:
-            return torch.futures.collect_all(all_futs)
-        fut: Future = Future()
-        fut.set_result(None)
-        return fut
-
-    def read_bytes(self, requests: List[BytesReadRequest]) -> Future[None]:
-        all_futs = []
-        for req in requests:
-            sinfo: _StorageInfo = req.meta.storage_data
-
-            with self._open_file(sinfo) as storage:
-                res = req.copy(storage)
-                if res is not None:
-                    all_futs.append(res)
-
-        if len(all_futs) > 0:
-            return torch.futures.collect_all(all_futs)
+        for relative_path, reqs in per_file.items():
+            with (self.path / relative_path).open("rb") as file:
+                # TODO sort by offset and cache the reading
+                for req in reqs:
+                    file_slice = self._slice_file(file, req.meta.storage_data)
+                    
+                    if isinstance(req, TensorReadRequest):
+                        view_to_copy = cast(Tensor, torch.load(file_slice, map_location=req.target_device))
+                        view_to_copy = tensor_narrow_n(view_to_copy, req.storage_offsets, req.lengths)
+                        req.copy(view_to_copy)
+                    else:
+                        req.copy(torch.load(file_slice))
 
         fut: Future = Future()
         fut.set_result(None)
@@ -259,3 +237,22 @@ class FileSystemReader(StorageReader):
     def read_metadata(self) -> Metadata:
         with (self.path / ".metadata").open("rb") as metadata_file:
             return pickle.load(metadata_file)
+
+    def prepare_local_plan(self, plan: LoadPlan) -> LoadPlan:
+        return plan
+
+    def prepare_global_plan(self, global_plan: List[LoadPlan]) -> List[LoadPlan]:
+        return global_plan
+
+    def prepare_reads(
+        state_dict: Dict[str, Any],
+        load_plan: LoadPlan,
+        load_bytes_callback,
+        copy_tensor_callback,
+    ) -> Tuple[List[BytesReadRequest], List[TensorReadRequest]]:
+        return default_prepare_reads(
+            state_dict,
+            load_plan,
+            load_bytes_callback,
+            copy_tensor_callback,
+        )
