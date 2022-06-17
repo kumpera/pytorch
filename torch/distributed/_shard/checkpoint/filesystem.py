@@ -129,11 +129,12 @@ class FileSystemWriter(StorageWriter):
                 file_name = gen_file(storage_plan)
                 with (self.path / file_name).open("wb") as w:
                     _write_item(w, write_item)
+                    length = w.tell()
                     os.fsync(w.fileno())
                     res.append(result_from_write_item(
                         write_item,
                         length,
-                        _StorageInfo(file_name, 0, w.tell())
+                        _StorageInfo(file_name, 0, length)
                     ))
 
         fut: Future[List[WriteResult]] = Future()
@@ -220,7 +221,7 @@ class FileSystemReader(StorageReader):
             md = pickle.load(metadata_file)
             return md
 
-    def prepare_local_plan(self, plan: LoadPlan) -> LoadPlan:
+    def prepare_local_plan(self, metadata: Metadata, plan: LoadPlan) -> LoadPlan:
         return plan
 
     def prepare_global_plan(self, global_plan: List[LoadPlan]) -> List[LoadPlan]:

@@ -19,12 +19,11 @@ class DistWrapper:
             self.rank = dist.get_rank(group)
             self.is_coordinator = self.rank == coordinator_rank
         else:
+            self.rank = 0
             self.is_coordinator = True
 
     def get_rank(self) -> int:
-        if self.use_dist:
-            return dist.get_rank(self.group)
-        return 0
+        return self.rank
 
     def get_world_size(self) -> int:
         if self.use_dist:
