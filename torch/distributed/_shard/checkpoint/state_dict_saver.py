@@ -5,126 +5,28 @@ import torch
 import io
 import torch.distributed as dist
 
-from .metadata import (
-    Metadata,
-)
-
 from .resharding import (
     create_default_local_plan,
     create_default_global_plan,
     create_default_metadata_only_plan,
-    create_default_checkpoint_metadata,
-    DefaultPlanner
+    populate_metadata_with_write_results,
+    DefaultSavePlanner
 )
 
 from .storage import (
     StorageWriter,
-    WriteItem,
-    WriteResult,
-    LocalPlan,
-    Planner
+    SavePlanner
 )
 
 from .utils import DistWrapper
-from .api import CheckpointException
 
-# -------------- private functions --------------
-
-"""
-Bad part of the current design:
-
-1) We use List[Plan] with ranks implicitly encoded in the index.
-    Should we use Dict[int, Plan] instead?
-
-Do we need to include the source rank of the write request?
-    It's implicit in the Plan object (maybe needs to be in Plan)
-
-How would this handle the planner load balancing across ranks?
-    It can handle both through rejection and stealing.
-
-2)Write data is eagerly evaluated
-The current model forces data to be eagerly evaluated which disables incremental
-    serialization/transformation.
-
-3) The way the planner and the storage layer attach data is different
-    storage does it through storage_data fields
-    planner does it through extending PlanningClasses
-
-4) The only MD that can be sent back from ranks is through WriteResults
-    Not great
-
-FIXME:
-    There's no way to pass ShardedTensor and global planner/storage data
-    to the final MD payload. At least not with the default planner.
-"""
-
-def _create_metadata_from_local_state_dict(state_dict: Dict[str, Any]) -> Metadata:
-    plan = create_default_metadata_only_plan(state_dict)
-    results = [WriteResult.from_write_item(req, "") for req in plan.items]
-    return create_default_checkpoint_metadata([results])
-
-"""
-New protocol:
-
-prepare: (coordinator)
-    storage.prepare() -> None 
-
-local_plan: (all ranks)
-    planner.local_plan -> storage.local_plan -> LocalPlan
-
-global_plan (coordinator)
-    planner.global_plan -> storage.global_plan -> GlobalPlan (list of LocalPlan)
-
-finalize_plan: (all ranks)
-    planner.merge_plan(local, global) -> storage.prepare_writes -> write requests
-
-write: (all ranks)
-    storage.write_data -> [WriteResult]
-
-finish: (coordinator)
-    planner.create_metadata([WriteResult]) -> Metadata
-    storagw.finish(metadata) -> None
-
-Notes:
-
-Should storage.prepare() return something?
-Lots of kinds of metadata hard/odd to ship to create_md:
-    - per checkpoint data
-    - per rank data (this could be items with different data but same FQN)
-Should storage.finish() return something?
-
-How to present the global plan?
-    List of LocalPlan
-    Dict of rank -> LocalPLan
-    A GlobalPlan object (which we'd broadcast to all ranks?)
-
-
-Load protocol::
-
-plan: (all ranks)
-    planner.prepare_read -> read requests
-
-
-read: (all ranks)
-    storage.read()
-
-
-Notes:
-    Should we pass Planners around or functions?
-
-    Should we introduce a similar protocol to save:
-        local plan -> global plan -> merge -> execute
-    This could enable things like read
-    
-
-"""
 def save_state_dict(
     state_dict: Dict[str, Any],
     storage_writer: StorageWriter,
     process_group: Optional[dist.ProcessGroup] = None,
     coordinator_rank: int = 0,
     no_dist: bool = False,
-    planner: Planner = None
+    planner: SavePlanner = None
 ) -> None:
     """
     Save a distributed model in SPMD style.
@@ -178,30 +80,26 @@ def save_state_dict(
     distW = DistWrapper(process_group, not no_dist, coordinator_rank)
 
     if planner is None:
-        planner = DefaultPlanner()
+        planner = DefaultSavePlanner()
 
     _ = distW.run_on_coordinator("prepare storage", storage_writer.prepare)
 
     def local_step():
-        local_plan = planner.create_local_plan(state_dict, is_coordinator)
+        planner.init(state_dict, is_coordinator)
+        local_plan = planner.create_local_plan()
         local_plan = storage_writer.prepare_local_plan(local_plan)
         return local_plan
-    
+
     def global_step(all_local_plans):
         all_local_plans = planner.create_global_plan(all_local_plans)
         all_local_plans = storage_writer.prepare_global_plan(all_local_plans)
         return all_local_plans
 
-    local_plan, central_plan = distW.map_scatter("plan", local_step, global_step)
+    central_plan = distW.map_scatter("plan", local_step, global_step)
 
     def write_data():
-        final_local_plan = planner.merge_plans(local_plan, central_plan)
-        tensor_write_requests, bytes_write_requests = storage_writer.prepare_writes(
-            state_dict,
-            final_local_plan,
-            planner.resolve_data
-        )
-        all_writes = storage_writer.write_data(final_local_plan.storage_data, tensor_write_requests, bytes_write_requests)
+        final_local_plan = planner.finish_plan(central_plan)
+        all_writes = storage_writer.write_data(final_local_plan, planner)
 
         all_writes.wait()
         return all_writes.value()
@@ -209,8 +107,5 @@ def save_state_dict(
     def finish_checkpoint(all_results):
         metadata = planner.create_checkpoint_metadata(all_results)
         storage_writer.finish(metadata=metadata)
-        # XXX do we return some sort of storage/planner result?
-        return None
 
     _ = distW.map_reduce("write", write_data, finish_checkpoint)
-
