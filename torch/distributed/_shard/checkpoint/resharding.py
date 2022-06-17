@@ -28,7 +28,7 @@ from .metadata import (
 )
 
 from .storage import (
-    LocalPlan,
+    SavePlan,
     WriteItem,
     WriteItemType,
     SavePlanner,
@@ -148,7 +148,7 @@ def _create_for_bytesio(fqn: str, bytes: Any):
         type=WriteItemType.BYTE_IO,
     )
 
-def create_default_metadata_only_plan(state_dict: Dict[str, Any]) -> LocalPlan:
+def create_default_metadata_only_plan(state_dict: Dict[str, Any]) -> SavePlan:
     requests = []
     for fqn, obj in state_dict.items():
         if isinstance(obj, ShardedTensor):
@@ -158,7 +158,7 @@ def create_default_metadata_only_plan(state_dict: Dict[str, Any]) -> LocalPlan:
             requests.append(_create_for_tensor(fqn, obj))
         else:
             requests.append(_create_for_bytesio(fqn, obj))
-    return LocalPlan(requests)
+    return SavePlan(requests)
 
 def create_write_entry(fqn: str, obj: Any) -> List[WriteItem]:
     if isinstance(obj, ShardedTensor):
@@ -173,9 +173,9 @@ def create_default_local_plan(state_dict: Dict[str, Any], is_coordinator: bool):
     for fqn, obj in state_dict.items():
         if isinstance(obj, ShardedTensor) or is_coordinator:
             requests += create_write_entry(fqn, obj)
-    return LocalPlan(requests)
+    return SavePlan(requests)
 
-def create_default_global_plan(all_plans: List[LocalPlan]) -> Tuple[List[LocalPlan], Metadata]:
+def create_default_global_plan(all_plans: List[SavePlan]) -> Tuple[List[SavePlan], Metadata]:
     """
     The default plan creates a Metadata object with -1 as size_in_bytes
     It modifies WriteItem::chunk_index.
@@ -388,14 +388,14 @@ class DefaultSavePlanner(SavePlanner):
         self.state_dict = state_dict
         self.is_coordinator = is_coordinator
 
-    def create_local_plan(self) -> LocalPlan:
+    def create_local_plan(self) -> SavePlan:
         return create_default_local_plan(self.state_dict, self.is_coordinator)
 
-    def create_global_plan(self, all_plans: List[LocalPlan]) -> List[LocalPlan]:
+    def create_global_plan(self, all_plans: List[SavePlan]) -> List[SavePlan]:
         self.global_plan, self.metadata = create_default_global_plan(all_plans)
         return self.global_plan
 
-    def finish_plan(self, new_plan: LocalPlan) -> LocalPlan:
+    def finish_plan(self, new_plan: SavePlan) -> SavePlan:
         return new_plan
 
     def create_checkpoint_metadata(self, all_results: List[List[WriteResult]]) -> Metadata:

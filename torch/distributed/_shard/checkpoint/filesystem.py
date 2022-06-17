@@ -15,7 +15,7 @@ from .metadata import (
 from .storage import (
     LoadPlanner,
     LoadPlan,
-    LocalPlan,
+    SavePlan,
     SavePlanner,
     StorageReader,
     StorageWriter,
@@ -74,11 +74,11 @@ class FileSystemWriter(StorageWriter):
         self.path = Path(path)
         self.single_file_per_rank = single_file_per_rank
 
-    def prepare_local_plan(self, plan: LocalPlan) -> LocalPlan:
+    def prepare_local_plan(self, plan: SavePlan) -> SavePlan:
         # There's no storage input in the local plan
         return plan
 
-    def prepare_global_plan(self, global_plan: List[LocalPlan]) -> List[LocalPlan]:
+    def prepare_global_plan(self, global_plan: List[SavePlan]) -> List[SavePlan]:
         # Add a prefix for each rank
         # FIXME maybe make this the default behavior?
         for i, plan in enumerate(global_plan):
@@ -87,7 +87,7 @@ class FileSystemWriter(StorageWriter):
 
     def write_data(
         self,
-        plan: LocalPlan,
+        plan: SavePlan,
         planner: SavePlanner,
     ) -> Future[List[WriteResult]]:
         res = []

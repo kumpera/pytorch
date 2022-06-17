@@ -19,43 +19,6 @@ from .metadata import (
 from torch.distributed._shard.sharded_tensor import (
     ShardMetadata
 )
-""""
-Notes on design issues:
-
-We need to resurface the prepare_xxx_ functions
-Can we unify WriteItem with ReadItem? Can we unity LocalPlan / LoadPlan?
-How about the planning phase?
-The way shard MD is defined in WriteItem is bad.
-
-There's a layer complexity/confusion going on the read side:
-On the write side, the planner picks stuff from the state_dict and handle that to the storage layer to figure out how to write each of them.
-
-On the read side, there's little for the planner itself to do beyond handling any transforms done by the write planner.
-
-What sort of scenarios need a central read plan?
-    One case that's reasonable but hard to deal with is to reduce read applification
-    when resharding.
-
-There's this odd separation of how we deserialize BytesIO and tensors.
-    Tensor is done by storage
-    bytesIO is done by Planner
--> Fixed, all on storage
-
-Where should tensor narrowing happen?
-    Dest tensor happens in storage::prepare_reads
-    Storage tensor happens in storage::write_data
-
-We ignore lenghts/offset for BytesIO and this is something we wanna care
-
-I'm not 100% sure of prepare_reads / prepare_writes WRT passing of callbacks.
-    Maybe pass a structurally typed object that has those methods?
-
-The current design assumes storage / planner to be stateless objects.
-    Having an init method on both that we pass some global data to them.
-        Like state_dict and metadata.
-
-"""
-
 
 class WriteItemType(Enum):
     TENSOR = auto()
@@ -101,7 +64,7 @@ class WriteResult:
     storage_data: Any
 
 @dataclass
-class LocalPlan:
+class SavePlan:
     items: List[WriteItem]
     storage_data: Any = None
     planner_data: Any = None
@@ -142,7 +105,7 @@ class SavePlanner(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def create_local_plan(self) -> LocalPlan:
+    def create_local_plan(self) -> SavePlan:
         """
         Compute the save plan for the current rank. This will be aggregated and fed into create_global_plan so any inputs for global planning should be returned from here.
 
@@ -151,7 +114,7 @@ class SavePlanner(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def create_global_plan(self, all_plans: List[LocalPlan]) -> List[LocalPlan]:
+    def create_global_plan(self, all_plans: List[SavePlan]) -> List[SavePlan]:
         """
         Compute the global checkpoint plan and return the local plan of each rank.
 
@@ -160,7 +123,7 @@ class SavePlanner(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def finish_plan(self, new_plan: LocalPlan) -> LocalPlan:
+    def finish_plan(self, new_plan: SavePlan) -> SavePlan:
         """
         Merge the plan created by `create_local_plan` and the result of `create_global_plan`.
 
@@ -252,23 +215,23 @@ class StorageWriter(abc.ABC):
     """
 
     @abc.abstractmethod
-    def prepare_local_plan(self, plan: LocalPlan) -> LocalPlan:
+    def prepare_local_plan(self, plan: SavePlan) -> SavePlan:
         """
         Add storage specific data to the plan.
 
         While this method can produce a completely different plan, the prefered
-        way is to store storage specific data in LocalPlan::storage_data and WriteItem::storage_data.
+        way is to store storage specific data in SavePlan::storage_data and WriteItem::storage_data.
         """
         pass
 
     @abc.abstractmethod
-    def prepare_global_plan(self, plans: List[LocalPlan]) -> List[LocalPlan]:
+    def prepare_global_plan(self, plans: List[SavePlan]) -> List[SavePlan]:
         """
         Set storage specific data to the global plan.
 
 
         While this method can produce a completely different plan, the prefered
-        way is to store storage specific data in LocalPlan::storage_data and WriteItem::storage_data.
+        way is to store storage specific data in SavePlan::storage_data and WriteItem::storage_data.
         """
         pass
 
@@ -289,7 +252,7 @@ class StorageWriter(abc.ABC):
     @abc.abstractmethod
     def write_data(
         self,
-        plan: LocalPlan,
+        plan: SavePlan,
         planner: SavePlanner
     ) -> Future[List[WriteResult]]:
         """
