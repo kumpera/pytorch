@@ -34,7 +34,7 @@ from torch.distributed._shard.checkpoint.metadata import (
 )
 
 from torch.distributed._shard.checkpoint.storage import (
-    LocalPlan,
+    SavePlan,
     SavePlanner,
     LoadPlan,
     LoadPlanner,
@@ -181,11 +181,11 @@ class FaultyStorageWriter(TestStorageBase, StorageWriter):
     ):
         super(FaultyStorageWriter, self).__init__(fail_conf)
 
-    def prepare_local_plan(self, plan: LocalPlan) -> LocalPlan:
+    def prepare_local_plan(self, plan: SavePlan) -> SavePlan:
         self._fail_rank("fail_prepare_local_plan")
         return plan
 
-    def prepare_global_plan(self, plans: List[LocalPlan]) -> List[LocalPlan]:
+    def prepare_global_plan(self, plans: List[SavePlan]) -> List[SavePlan]:
         self._fail_rank("fail_prepare_global_plan")
         return plans
 
@@ -194,7 +194,7 @@ class FaultyStorageWriter(TestStorageBase, StorageWriter):
 
     def write_data(
         self,
-        plan: LocalPlan,
+        plan: SavePlan,
         planner: SavePlanner
     ) -> Future[List[WriteResult]]:
         self._fail_rank("fail_write_data")
