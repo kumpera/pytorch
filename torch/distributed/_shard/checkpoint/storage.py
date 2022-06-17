@@ -226,11 +226,11 @@ class LoadPlanner:
         pass
 
     @abc.abstractmethod
-    def load_bytes(self, state_dict, load_item, stream) -> None:
+    def write_bytes(self, read_item: ReadItem, value: io.BytesIO) -> None:
         pass
 
     @abc.abstractmethod
-    def copy_tensor(self, state_dict, load_item, dest: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+    def resolve_tensor(self, read_item: ReadItem) -> torch.Tensor:
         pass
 
 

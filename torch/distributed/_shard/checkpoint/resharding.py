@@ -156,18 +156,19 @@ def create_default_metadata_only_plan(state_dict: Dict[str, Any]):
             requests.append(_create_for_bytesio(fqn, obj))
     return LocalPlan(requests)
 
+def create_write_entry(fqn: str, obj: Any) -> List[WriteItem]:
+    if isinstance(obj, ShardedTensor):
+        return [_create_for_shard(fqn, obj, shard) for shard in obj.local_shards()]
+    elif isinstance(obj, Tensor):
+        return [_create_for_tensor(fqn, obj)]
+    else:
+       return [_create_for_bytesio(fqn, obj)]
+
 def create_default_local_plan(state_dict: Dict[str, Any], is_coordinator: bool):
     requests = []
     for fqn, obj in state_dict.items():
-        if isinstance(obj, ShardedTensor):
-            for shard in obj.local_shards():
-                requests.append(_create_for_shard(fqn, obj, shard))
-        elif isinstance(obj, Tensor):
-            if is_coordinator:
-                requests.append(_create_for_tensor(fqn, obj))
-        else:
-            if is_coordinator:
-                requests.append(_create_for_bytesio(fqn, obj))
+        if isinstance(obj, ShardedTensor) or is_coordinator:
+            requests += create_write_entry(fqn, obj)
     return LocalPlan(requests)
 
 def create_default_global_plan(all_plans: List[LocalPlan]) -> Tuple[List[LocalPlan], Metadata]:
@@ -243,15 +244,15 @@ def _create_shard_for(tensor: Tensor) -> Shard:
 
 def _get_extra_metadata(md: Metadata, key: MetadataIndex):
     planner_data = None
-    if md.planner_data is not None:
+    if isinstance(md.planner_data, Dict):
         planner_data = md.planner_data.get(key, None)
     storage_data = None
-    if md.storage_data is not None:
+    if isinstance(md.storage_data, Dict):
         storage_data = md.storage_data.get(key, None)
     return (planner_data, storage_data)
 
 
-def _create_read_items(
+def _create_sharded_read_items(
     fqn: str,
     checkpoint_md: TensorStorageMetadata,
     local_shards: List[Shard],
@@ -304,6 +305,36 @@ def _create_read_items(
             )
     return read_items
 
+
+def create_read_items(metadata: Metadata, fqn: str, md: STORAGE_TYPES, obj: Any):
+    if isinstance(md, BytesStorageMetadata):
+        item_idx = MetadataIndex(fqn, None)
+        planner_data, storage_data = _get_extra_metadata(metadata, item_idx)
+        return [ReadItem(
+            fqn=fqn,
+            storage_offsets=torch.Size([0]),
+            dest_offsets=torch.Size([0]),
+            lengths=torch.Size([md.size_in_bytes]),
+            planner_data=planner_data,
+            storage_data=storage_data,
+        )]
+
+    elif isinstance(obj, ShardedTensor):
+        local_shards = obj.local_shards()
+    elif isinstance(obj, torch.Tensor):
+        local_shards = [_create_shard_for(obj)]
+    else:
+        raise ValueError(
+            f"Invalid checkpoint metadata for {fqn}, " +
+            f"expected BytesStorageMetadata but found {type(md)}"
+        )
+
+    return _create_sharded_read_items(
+        fqn,
+        md,
+        local_shards,
+        metadata)
+
 def create_default_read_plan(
     state_dict: Dict[str, Any],
     metadata: Metadata,
@@ -315,56 +346,37 @@ def create_default_read_plan(
     """
     for fqn, obj in state_dict.items():
         md = metadata.state_dict_metadata[fqn]
-
-
-        if isinstance(md, BytesStorageMetadata):
-            item_idx = MetadataIndex(fqn, None)
-            planner_data, storage_data = _get_extra_metadata(metadata, item_idx)
-            requests.append(ReadItem(
-                fqn=fqn,
-                storage_offsets=torch.Size([0]),
-                dest_offsets=torch.Size([0]),
-                lengths=torch.Size([md.size_in_bytes]),
-                planner_data=planner_data,
-                storage_data=storage_data,
-            ))
-            continue
-        elif isinstance(obj, ShardedTensor):
-            local_shards = obj.local_shards()
-        elif isinstance(obj, torch.Tensor):
-            tensor = obj.detach()
-            local_shards = [_create_shard_for(tensor)]
-        else:
-            raise ValueError(
-                f"Invalid checkpoint metadata for {fqn}, " +
-                f"expected BytesStorageMetadata but found {type(md)}"
-            )
-
-        requests += _create_read_items(
-            fqn,
-            md,
-            local_shards,
-            metadata)
+        requests += create_read_items(metadata, fqn, md, obj)
 
     return LoadPlan(requests)
 
 def create_default_global_read_plan(all_plans: List[LoadPlan]) -> List[LoadPlan]:
     return all_plans
 
-def default_item_lookup(state_dict, item):
-    obj = state_dict[item.fqn]
+def default_item_lookup(state_dict, fqn, chunk):
+    obj = state_dict[fqn]
     if not isinstance(obj, ShardedTensor):
         return obj
 
-    if item.chunk is None or item.chunk.offsets is None:
-        raise ValueError(f"Cannot lookup {item.fqn} since its a ShardedTensor and no offset was provided")
+    if chunk is None or chunk.offsets is None:
+        raise ValueError(f"Cannot lookup {fqn} since its a ShardedTensor and no offset was provided")
 
-    offsets = torch.Size(item.chunk.offsets)
+    offsets = torch.Size(chunk.offsets)
 
     for shard in obj.local_shards():
         if torch.Size(shard.metadata.shard_offsets) == offsets:
             return shard.tensor
-    raise ValueError(f"could not find shard at '{offsets}' for FQN: '{item.fqn}'")
+    raise ValueError(f"could not find shard at '{offsets}' for FQN: '{fqn}'")
+
+def default_resolve_data(state_dict, fqn, chunk, is_bytesio):
+    obj = default_item_lookup(state_dict, fqn, chunk)
+
+    if is_bytesio:
+        bytes = io.BytesIO()
+        torch.save(obj, bytes)
+        obj = bytes
+    return obj
+
 
 class DefaultSavePlanner(SavePlanner):
     def init(self, state_dict: Dict[str, Any], is_coordinator: bool) -> None:
@@ -386,15 +398,8 @@ class DefaultSavePlanner(SavePlanner):
         return self.metadata
 
     def resolve_data(self, write_item: WriteItem) -> Union[torch.Tensor, io.BytesIO]:
-        obj = default_item_lookup(self.state_dict, write_item)
-
-        # obj = write_item.lookup(self.state_dict)
-        if write_item.is_bytesio:
-            bytes = io.BytesIO()
-            torch.save(obj, bytes)
-            obj = bytes
-        return obj
-
+        return default_resolve_data(self.state_dict, write_item.fqn, write_item.chunk, write_item.is_bytesio)
+ 
 
 class DefaultLoadPlanner(LoadPlanner):
     def init(self, state_dict: STATE_DICT_TYPE, metadata: Metadata, is_coordinator: bool) -> None:
@@ -415,6 +420,6 @@ class DefaultLoadPlanner(LoadPlanner):
         self.state_dict[read_item.fqn] = torch.load(value)
 
     def resolve_tensor(self, read_item: ReadItem):
-        tensor = default_item_lookup(self.state_dict, read_item)
+        tensor = default_item_lookup(self.state_dict, read_item.fqn, read_item.chunk)
         tensor = tensor_narrow_n(tensor, read_item.dest_offsets, read_item.lengths)
         return tensor

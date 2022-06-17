@@ -18,6 +18,7 @@ from .storage import (
     SavePlanner
 )
 
+from .metadata import Metadata
 from .utils import DistWrapper
 
 def save_state_dict(
@@ -27,7 +28,7 @@ def save_state_dict(
     coordinator_rank: int = 0,
     no_dist: bool = False,
     planner: SavePlanner = None
-) -> None:
+) -> Metadata:
     """
     Save a distributed model in SPMD style.
 
@@ -107,5 +108,7 @@ def save_state_dict(
     def finish_checkpoint(all_results):
         metadata = planner.create_checkpoint_metadata(all_results)
         storage_writer.finish(metadata=metadata)
+        return metadata
 
-    _ = distW.map_reduce("write", write_data, finish_checkpoint)
+    return distW.map_reduce("write", write_data, finish_checkpoint)
+
