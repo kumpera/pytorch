@@ -1,9 +1,8 @@
-import itertools
 from dataclasses import dataclass
 import os
 import io
 import pickle
-from typing import List, Optional, Union, Any, Tuple, Dict, cast
+from typing import List, Union, Dict, cast
 
 import torch
 from torch import Tensor
@@ -14,27 +13,25 @@ from .metadata import (
     Metadata,
 )
 from .storage import (
-    LocalPlan,
+    LoadPlanner,
     LoadPlan,
+    LocalPlan,
+    SavePlanner,
     StorageReader,
     StorageWriter,
     WriteResult,
-    BytesReadRequest,
-    BytesWriteRequest,
-    TensorReadRequest,
-    TensorWriteRequest,
-    RESOLVE_DATA_TYPE
-)
-
-from .resharding import (
-    default_prepare_writes,
-    default_prepare_reads
+    ReadItem,
+    WriteItem
 )
 
 from .utils import tensor_narrow_n
 
+
 @dataclass
 class _StorageInfo:
+    """
+    This is the per entry storage info
+    """
     relative_path: str
     offset: int
     length: int
@@ -42,6 +39,15 @@ class _StorageInfo:
 @dataclass
 class _StoragePrefix:
     prefix: str
+
+
+def result_from_write_item(item: WriteItem, size_in_bytes, storage_data) -> WriteResult:
+    return WriteResult(
+        fqn=item.fqn,
+        chunk_index=item.chunk_index,
+        size_in_bytes=size_in_bytes,
+        planner_data=item.planner_data,
+        storage_data=storage_data)
 
 
 class FileSystemWriter(StorageWriter):
@@ -79,35 +85,14 @@ class FileSystemWriter(StorageWriter):
             plan.storage_data = _StoragePrefix(f"__{i}_")
         return global_plan
 
-    def prepare_writes(
-        self,
-        state_dict: Dict[str, Any],
-        plan: LocalPlan,
-        resolve_data: RESOLVE_DATA_TYPE,
-    ) -> Tuple[List[TensorWriteRequest], List[BytesWriteRequest]]:
-        return default_prepare_writes(state_dict, plan, resolve_data)
-
     def write_data(
         self,
-        storage_plan: _StoragePrefix,
-        tensors: List[TensorWriteRequest],
-        bytes: List[BytesWriteRequest]
+        plan: LocalPlan,
+        planner: SavePlanner,
     ) -> Future[List[WriteResult]]:
-        # The following couple lines are simple implementation to get
-        # things going.
-        #
-        # At load time, to enable resharding, we use (sub)view of the tensor.
-        # Since the storage of the tensor might not be contiguous. we need to
-        # preserve the original view, to calculate the correct sub view at load.
-        #
-        # `torch.save` saves both the view and storage, it is a good option
-        # for unblocking. There are two drawbacks:
-        # 1. `torch.save` is pickle based, and pickle is not known for its
-        #   compatibility, we should consider replacing it with a more
-        #   stable option.
-        # 2. pickle is not streamable.
         res = []
         file_count = 0
+        storage_plan: _StoragePrefix = plan.storage_data
 
         def gen_file(prefix: _StoragePrefix):
             nonlocal file_count
@@ -115,49 +100,40 @@ class FileSystemWriter(StorageWriter):
             file_count += 1
             return file_name
 
-        # This is uggly, cleanup
+        def _write_item(stream, write_item):
+            data = planner.resolve_data(write_item)
+            if write_item.is_bytesio:
+                assert isinstance(data, io.BytesIO)
+                stream.write(data.getbuffer())
+            else:
+                assert isinstance(data, torch.Tensor)
+                torch.save(data, stream)
+
+        # This is ugly, cleanup
         if self.single_file_per_rank:
             file_name = gen_file(storage_plan)
             with (self.path / file_name).open("wb") as w:
-                for tensor_req in tensors:
+                for write_item in plan.items:
                     offset = w.tell()
-                    torch.save(tensor_req.tensor, w)
+                    _write_item(w, write_item)
                     length = w.tell() - offset
-                    res.append(WriteResult.from_write_item(
-                        tensor_req.item,
+                    res.append(result_from_write_item(
+                        write_item,
+                        length,
                         _StorageInfo(file_name, offset, length)
                     ))
-
-                for bytes_req in bytes:
-                    offset = w.tell()
-                    w.write(bytes_req.bytes.getbuffer())
-                    length = w.tell() - offset
-                    res.append(WriteResult.from_write_item(
-                        bytes_req.item,
-                        _StorageInfo(file_name, offset, length),
-                    ))
-
                 os.fsync(w.fileno())
 
         else:
-            for tensor_req in tensors:
+            for write_item in plan.items:
                 file_name = gen_file(storage_plan)
                 with (self.path / file_name).open("wb") as w:
-                    torch.save(tensor_req.tensor, w)
+                    _write_item(w, write_item)
                     os.fsync(w.fileno())
-                    res.append(WriteResult.from_write_item(
-                        tensor_req.item,
+                    res.append(result_from_write_item(
+                        write_item,
+                        length,
                         _StorageInfo(file_name, 0, w.tell())
-                    ))
-
-            for bytes_req in bytes:
-                file_name = gen_file(storage_plan)
-                with (self.path / file_name).open("wb") as w:
-                    w.write(bytes_req.bytes.getbuffer())
-                    os.fsync(w.fileno())
-                    res.append(WriteResult.from_write_item(
-                        bytes_req.item,
-                        _StorageInfo(file_name, 0, w.tell()),
                     ))
 
         fut: Future[List[WriteResult]] = Future()
@@ -200,34 +176,39 @@ class FileSystemReader(StorageReader):
 
     def _slice_file(self, file, sinfo: _StorageInfo):
         return SlicedBufferedReader(
-            io.FileIO(file.fileno(),closefd=False), 
+            io.FileIO(file.fileno(), closefd=False),
             sinfo.offset, sinfo.length
         )
 
-    def read_data(self,
-        storage_plan: Any,
-        byte_requests: List[BytesReadRequest],
-        tensor_requests: List[TensorReadRequest]
+    def read_data(
+        self,
+        plan: LoadPlan,
+        planner: LoadPlanner
     ) -> Future[None]:
 
         # group requests by file
-        per_file = dict()
-        for br in itertools.chain(byte_requests, tensor_requests):
-            path = br.meta.storage_data.relative_path
-            per_file.setdefault(path, []).append(br)
+        per_file: Dict[str, List[ReadItem]] = dict()
+        for read_item in plan.items:
+            path = cast(_StorageInfo, read_item.storage_data).relative_path
+            per_file.setdefault(path, []).append(read_item)
 
         for relative_path, reqs in per_file.items():
             with (self.path / relative_path).open("rb") as file:
                 # TODO sort by offset and cache the reading
                 for req in reqs:
-                    file_slice = self._slice_file(file, req.meta.storage_data)
-                    
-                    if isinstance(req, TensorReadRequest):
-                        view_to_copy = cast(Tensor, torch.load(file_slice, map_location=req.target_device))
-                        view_to_copy = tensor_narrow_n(view_to_copy, req.storage_offsets, req.lengths)
-                        req.copy(view_to_copy)
+                    file_slice = self._slice_file(file, req.storage_data)
+
+                    if req.is_bytesio:
+                        planner.write_bytes(req, file_slice)
                     else:
-                        req.copy(torch.load(file_slice))
+                        tensor = cast(Tensor, torch.load(file_slice, map_location="cpu"))
+                        tensor = tensor_narrow_n(tensor, req.storage_offsets, req.lengths)
+                        target_tensor = planner.resolve_tensor(req)
+
+                        assert (
+                            target_tensor.size() == tensor.size()
+                        ), f"req {req.fqn} mismatch sizes {target_tensor.size()} vs {tensor.size()}"
+                        target_tensor.copy_(tensor)
 
         fut: Future = Future()
         fut.set_result(None)
@@ -236,23 +217,11 @@ class FileSystemReader(StorageReader):
     # Implementating the abstract function in StorageReader
     def read_metadata(self) -> Metadata:
         with (self.path / ".metadata").open("rb") as metadata_file:
-            return pickle.load(metadata_file)
+            md = pickle.load(metadata_file)
+            return md
 
     def prepare_local_plan(self, plan: LoadPlan) -> LoadPlan:
         return plan
 
     def prepare_global_plan(self, global_plan: List[LoadPlan]) -> List[LoadPlan]:
         return global_plan
-
-    def prepare_reads(
-        state_dict: Dict[str, Any],
-        load_plan: LoadPlan,
-        load_bytes_callback,
-        copy_tensor_callback,
-    ) -> Tuple[List[BytesReadRequest], List[TensorReadRequest]]:
-        return default_prepare_reads(
-            state_dict,
-            load_plan,
-            load_bytes_callback,
-            copy_tensor_callback,
-        )

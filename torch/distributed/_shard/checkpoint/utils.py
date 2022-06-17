@@ -1,7 +1,7 @@
-import email
+import traceback
+
 from typing import Any, List, Union, Callable, Tuple
 import torch.distributed as dist
-import traceback
 from .api import CheckpointException
 import torch
 
@@ -20,7 +20,6 @@ class DistWrapper:
             self.is_coordinator = self.rank == coordinator_rank
         else:
             self.is_coordinator = True
-
 
     def get_rank(self) -> int:
         if self.use_dist:
@@ -59,7 +58,7 @@ class DistWrapper:
 
     def allgather(self, object: Any) -> List[Any]:
         if self.use_dist:
-            gather_objs = [None] * dist.get_world_size(self.group) if self.is_coordinator else None
+            gather_objs = [None] * dist.get_world_size(self.group)
 
             dist.all_gather_object(
                 object_list=gather_objs,
@@ -86,7 +85,7 @@ class DistWrapper:
         return local_reply
 
     def run_on_coordinator(self, step, coordinator_cb: Callable[[], Any]) -> Any:
-        result: Any
+        result: Any = None
         if self.is_coordinator:
             try:
                 result = coordinator_cb()
@@ -103,7 +102,7 @@ class DistWrapper:
         step: str,
         map_cb: Callable[[], Any],
         coordinator_cb: Callable[[List[Any]], List[Any]]
-    ) -> Tuple[Any, Any]:
+    ) -> Any:
         try:
             local_data = map_cb()
         except BaseException as e:
@@ -111,6 +110,7 @@ class DistWrapper:
             local_data = e
 
         all_data = self.gather(local_data)
+        all_results = None
         if self.is_coordinator:
             node_failures = {i: err for i, err in enumerate(all_data) if isinstance(err, BaseException)}
 
@@ -120,7 +120,7 @@ class DistWrapper:
                 except BaseException as e:
                     traceback.print_exc()
                     node_failures[self.rank] = e
-            
+
             if len(node_failures) > 0:
                 all_results = [CheckpointException(step, node_failures)] * self.get_world_size()
 
@@ -141,6 +141,7 @@ class DistWrapper:
             local_data = e
 
         all_data = self.gather(local_data)
+        result = None
         if self.is_coordinator:
             node_failures = {i: err for i, err in enumerate(all_data) if isinstance(err, BaseException)}
 
@@ -150,7 +151,7 @@ class DistWrapper:
                 except BaseException as e:
                     traceback.print_exc()
                     node_failures[self.rank] = e
-            
+
             if len(node_failures) > 0:
                 result = CheckpointException(step, node_failures)
 

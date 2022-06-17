@@ -20,102 +20,19 @@ from torch.distributed._shard.sharding_spec._internals import (
 from .metadata import (
     BytesStorageMetadata,
     Metadata,
-    ShardedTensorStorageMetadata,
-    ShardStorageMetadata,
     TensorStorageMetadata,
 )
 from .resharding import (
     DefaultLoadPlanner,
-    _prepare_generic_tensor_read,
     _shards_get_overlap_region_wrt_saved_tensor
 )
 from .storage import (
-    BytesReadRequest,
     StorageReader,
-    TensorReadRequest,
-    Planner,
     LoadPlanner,
     LoadPlan,
     ReadItem
 )
 from .utils import DistWrapper
-from .api import CheckpointException
-
-
-def _create_shard_metadata(size: torch.Size) -> ShardMetadata:
-    return ShardMetadata(
-        shard_offsets=[0] * len(size),
-        shard_sizes=list(size),
-    )
-
-def _create_shard_for(tensor: Tensor) -> Shard:
-    return Shard(
-        tensor=tensor,
-        metadata=_create_shard_metadata(tensor.size()),
-    )
-
-def _create_checkpoint_shard_for(storage: TensorStorageMetadata) -> ShardStorageMetadata:
-    return ShardStorageMetadata(
-        # The metadata device is not used during loading.
-        shard_metadata=_create_shard_metadata(storage.size),
-        storage_key=storage.storage_key,
-    )
-
-def _reshard_and_prepare_read_request(
-    state_dict: Dict[str, Any],
-    metadata_from_storage: Metadata,
-    planner: LoadPlanner
-) -> Tuple[List[BytesReadRequest], List[TensorReadRequest]]:
-    """
-    Use the loaded metadata and the current state dict to map the saved tensors to current tensor
-    """
-    tensor_read_requests = []
-    bytes_read_requests = []
-    for fqn, obj in state_dict.items():
-        md = metadata_from_storage.state_dict_metadata[fqn]
-        if isinstance(obj, ShardedTensor):
-            local_shards = obj.local_shards()
-        elif isinstance(obj, torch.Tensor):
-            tensor = obj.detach()
-            local_shards = [_create_shard_for(tensor)]
-        else:
-            if isinstance(md, BytesStorageMetadata):
-                byte_req = BytesReadRequest(
-                    fqn=fqn,
-                    meta=md,
-                    copy=partial(planner.load_bytes, state_dict, fqn, md)
-                )
-                bytes_read_requests.append(byte_req)
-            else:
-                raise ValueError(
-                    f"Invalid checkpoint metadata for {fqn}, " +
-                    f"expected BytesStorageMetadata but found {type(md)}"
-                )
-            continue
-
-        if isinstance(md, ShardedTensorStorageMetadata):
-            checkpoint_shards = [
-                (smd.shard_metadata, smd) for smd in md.shards
-            ]
-        elif isinstance(md, TensorStorageMetadata):
-            checkpoint_shards = [
-                (_create_shard_metadata(md.info.size, "cpu"), md)    
-            ]
-        else:
-            raise ValueError(
-                f"Invalid checkpoint metadata for {fqn}, " +
-                f"expected TensorStorageMetadata but found {type(md)}"
-            )
-
-
-        tensor_read_requests += _prepare_generic_tensor_read(
-            fqn,
-            checkpoint_shards,
-            local_shards,
-            planner.resolve_tensor,
-            planner.copy_tensor)
-
-    return (bytes_read_requests, tensor_read_requests)
 
 def load_state_dict(
     state_dict: Dict[str, Any],
@@ -181,32 +98,27 @@ def load_state_dict(
         is the user's responsibility to ensure that this is set so that each rank
         has an individual GPU, via ``torch.cuda.set_device()``
     """
-    is_coordinator = no_dist or dist.get_rank(process_group) == coordinator_rank
     distW = DistWrapper(process_group, not no_dist, coordinator_rank)
-
     if planner is None:
         planner = DefaultLoadPlanner()
 
     def local_step():
-        local_plan = planner.create_local_plan(state_dict, is_coordinator)
+        metadata = storage_reader.read_metadata()
+        planner.init(state_dict, metadata, distW.is_coordinator)
+        local_plan = planner.create_local_plan()
         local_plan = storage_reader.prepare_local_plan(local_plan)
         return local_plan
-    
+
     def global_step(all_local_plans):
         all_local_plans = planner.create_global_plan(all_local_plans)
         all_local_plans = storage_reader.prepare_global_plan(all_local_plans)
         return all_local_plans
 
-    local_plan, central_plan = distW.map_scatter("plan", local_step, global_step)
+    central_plan = distW.map_scatter("plan", local_step, global_step)
 
     def read_data():
-        final_local_plan = planner.merge_plans(local_plan, central_plan)
-        bytes_read_requests, tensor_read_requests = storage_reader.prepare_reads(
-            state_dict,
-            final_local_plan,
-        )
-
-        all_reads = storage_reader.read_data(final_local_plan.storage_data, bytes_read_requests, tensor_read_requests)
+        final_local_plan = planner.finish_plan(central_plan)
+        all_reads = storage_reader.read_data(final_local_plan, planner)
 
         all_reads.wait()
         return None
@@ -215,7 +127,7 @@ def load_state_dict(
 
 
 def _validate_sharded_tensor(
-    tensor_md: ShardedTensorMetadata, checkpoint_md: ShardedTensorStorageMetadata
+    tensor_md: ShardedTensorMetadata, checkpoint_md: TensorStorageMetadata
 ) -> None:
     # We assume the incoming tensor has being validated during construction
 
