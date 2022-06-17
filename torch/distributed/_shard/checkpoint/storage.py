@@ -116,6 +116,7 @@ class ReadItem:
     dest_offsets: torch.Size
     lengths: torch.Size
 
+    # This allows to locate a shard in a ST
     chunk: Optional[ChunkStorageMetadata] = None
     chunk_index: Optional[int] = None
 

@@ -102,15 +102,19 @@ def _tensor_props_for(tensor: torch.Tensor) -> TensorProperties:
         pin_memory=tensor.is_pinned()
     )
 
+
+def _chunk_for_sharmd(shard_md: ShardMetadata) -> ChunkStorageMetadata:
+    return ChunkStorageMetadata(
+        offsets=torch.Size(shard_md.shard_offsets),
+        sizes=torch.Size(shard_md.shard_sizes),
+        size_in_bytes=-1,
+    )
+
 def _create_for_shardmd(fqn: str, sharded_tensor: ShardedTensor, shard_md: ShardMetadata) -> WriteItem:
     return WriteItem(
         fqn=fqn,
         type=WriteItemType.SHARD,
-        chunk=ChunkStorageMetadata(
-            offsets=torch.Size(shard_md.shard_offsets),
-            sizes=torch.Size(shard_md.shard_sizes),
-            size_in_bytes=-1,
-        ),
+        chunk=_chunk_for_sharmd(shard_md),
         tensor_info=_sharded_tensor_props_for(sharded_tensor),
     )
 
@@ -144,7 +148,7 @@ def _create_for_bytesio(fqn: str, bytes: Any):
         type=WriteItemType.BYTE_IO,
     )
 
-def create_default_metadata_only_plan(state_dict: Dict[str, Any]):
+def create_default_metadata_only_plan(state_dict: Dict[str, Any]) -> LocalPlan:
     requests = []
     for fqn, obj in state_dict.items():
         if isinstance(obj, ShardedTensor):
@@ -294,7 +298,7 @@ def _create_sharded_read_items(
             read_items.append(
                 ReadItem(
                     fqn=fqn,
-                    chunk=storage_md,
+                    chunk=_chunk_for_sharmd(shard.metadata),
                     chunk_index=idx,
                     storage_offsets=torch.Size(storage_offsets),
                     dest_offsets=torch.Size(dest_offsets),
@@ -366,6 +370,7 @@ def default_item_lookup(state_dict, fqn, chunk):
     for shard in obj.local_shards():
         if torch.Size(shard.metadata.shard_offsets) == offsets:
             return shard.tensor
+
     raise ValueError(f"could not find shard at '{offsets}' for FQN: '{fqn}'")
 
 def default_resolve_data(state_dict, fqn, chunk, is_bytesio):

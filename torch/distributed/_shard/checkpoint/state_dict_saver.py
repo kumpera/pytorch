@@ -21,6 +21,12 @@ from .storage import (
 from .metadata import Metadata
 from .utils import DistWrapper
 
+def _create_metadata_from_local_state_dict(state_dict: Dict[str, Any]) -> Metadata:
+    plan = create_default_metadata_only_plan(state_dict)
+    _, md = create_default_global_plan([plan])
+    return md
+
+
 def save_state_dict(
     state_dict: Dict[str, Any],
     storage_writer: StorageWriter,

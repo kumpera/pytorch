@@ -106,7 +106,7 @@ def load_state_dict(
         metadata = storage_reader.read_metadata()
         planner.init(state_dict, metadata, distW.is_coordinator)
         local_plan = planner.create_local_plan()
-        local_plan = storage_reader.prepare_local_plan(local_plan)
+        local_plan = storage_reader.prepare_local_plan(metadata, local_plan)
         return local_plan
 
     def global_step(all_local_plans):
@@ -160,60 +160,3 @@ def _validate_sharded_tensor(
                 f"Shard {shard_md} only has {read_volume} available" +
                 f" elements but needs {shard_volume}"
             )
-
-def validate_metadata(
-    state_dict: Dict[str, Any], metadata: Metadata
-) -> None:
-    """
-    Verify if it's possible to correctly load `state_dict` from `metadata`.
-
-    This method validate if a checkpoint is usable with a given model
-    state_dict without loading it. It will raise ValueError if it finds
-    anything problematic.
-
-    Args:
-        state_dict: A state_dict to verify if it's loadable.
-        metadata: Checkpoint metadata to verify against.
-
-    Returns:
-        None
-
-    Example:
-        >>> my_model: torch.nn.Model = ....
-        >>> my_reader: torch.distributed._shard.checkpoint.StorageReader = ...
-
-        >>> torch.distributed._shard.checkpoint.validate_metadata(my_model.state_dict(), my_reader.read_metadata())
-        None
-    ```
-
-    """
-    for fqn, obj in state_dict.items():
-        if isinstance(obj, ShardedTensor):
-            if fqn not in metadata.state_dict_metadata:
-                raise ValueError(f"{fqn}: Could not find ShardedTensor metadata")
-
-            md = metadata.state_dict_metadata[fqn]
-            if not isinstance(md, ShardedTensorStorageMetadata):
-                raise ValueError(f"{fqn}: Expected ShardedTensorStorageMetadata but found: {type(md)}")
-
-            # Check if the overall ShardedTensor size is the same. Individual shards don't matter as we can reshard.
-            md_size = md.size
-            tensor_size = obj.metadata().size
-            if md_size != tensor_size:
-                raise ValueError(
-                    f"{fqn}: Incompatible ShardedTensor size: expectected {tensor_size} but found {md_size}"
-                )
-
-            _validate_sharded_tensor(obj.metadata(), md)
-        elif isinstance(obj, torch.Tensor):
-            if fqn not in metadata.state_dict_metadata:
-                raise ValueError(f"{fqn}: Could not find Tensor metadata")
-
-            md = metadata.state_dict_metadata[fqn]
-            if not isinstance(md, TensorStorageMetadata):
-                raise ValueError(f"{fqn}: Expected TensorStorageMetadata but found: {type(md)}")
-
-            if md.size != obj.size():
-                raise ValueError(
-                    f"{fqn}: Incompatible tensor size: expected {obj.size()} but found {md.size}"
-                )
