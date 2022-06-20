@@ -4,14 +4,23 @@ from torch.distributed._shard.sharded_tensor.metadata import TensorProperties
 
 import torch
 
-@dataclass(frozen=True, unsafe_hash=True)
+@dataclass(frozen=True)
 class MetadataIndex:
-    """
-    This can be used to index into any item in Metadata
-    TODO (add index hint)
-    """
     fqn: str
     offset: Optional[torch.Size] = None
+    index: Optional[int] = None
+
+    def __post_init__(self):
+        if self.index is not None and self.offset is None:
+            raise ValueError("index cannot have a value when offset is None")
+
+    def __eq__(self, other):
+        if isinstance(other, MetadataIndex):
+            return self.fqn == other.fqn and self.offset == other.offset
+        return False
+
+    def __hash__(self):
+        return hash((self.fqn, self.offset,))
 
 @dataclass
 class TensorInfo:
