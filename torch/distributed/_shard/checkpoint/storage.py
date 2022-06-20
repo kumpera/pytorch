@@ -9,16 +9,23 @@ from torch.futures import Future
 from enum import Enum, auto
 
 from .metadata import (
-    BytesStorageMetadata,
     ChunkStorageMetadata,
     Metadata,
     TensorInfo,
-    TensorStorageMetadata,
 )
 
-from torch.distributed._shard.sharded_tensor import (
-    ShardMetadata
-)
+
+""""
+What's next:
+
+Remove _data items from Read/Write/Item
+Create LoadItemType
+Move to MetadataIndex instead of 3 odd fields
+Fix the layering problem that's create_read_items
+Make dist-cp implementable with just super() + customization
+    Maybe not possible?
+"""
+
 
 class WriteItemType(Enum):
     TENSOR = auto()
