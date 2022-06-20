@@ -8,9 +8,10 @@ import torch
 class MetadataIndex:
     """
     This can be used to index into any item in Metadata
+    TODO (add index hint)
     """
     fqn: str
-    chunk_index: Optional[int]
+    offset: Optional[torch.Size] = None
 
 @dataclass
 class TensorInfo:

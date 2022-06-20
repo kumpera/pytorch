@@ -1,4 +1,5 @@
 import io
+from multiprocessing.sharedctypes import Value
 from typing import List, Tuple, Dict, Any, Union, cast
 
 import torch
@@ -178,7 +179,6 @@ def create_default_local_plan(state_dict: Dict[str, Any], is_coordinator: bool):
 def create_default_global_plan(all_plans: List[SavePlan]) -> Tuple[List[SavePlan], Metadata]:
     """
     The default plan creates a Metadata object with -1 as size_in_bytes
-    It modifies WriteItem::chunk_index.
     """
     md: Dict[str, STORAGE_TYPES]= dict()
 
@@ -199,12 +199,16 @@ def create_default_global_plan(all_plans: List[SavePlan]) -> Tuple[List[SavePlan
                     ))
                 )
 
-                idx = len(tensor_md.chunks)
                 assert item.chunk is not None, f"Cannot create MD for tensor without bounds. FQN: {item.fqn}"
                 tensor_md.chunks.append(item.chunk)
-                item.chunk_index = idx
 
     return (all_plans, Metadata(md))
+
+def get_chunk_index(list: List[ChunkStorageMetadata], offset: torch.Size):
+    for i,c in enumerate(list):
+        if c.offsets == offset:
+            return i
+    raise ValueError(f"Offset {offset} not found")
 
 def populate_metadata_with_write_results(md: Metadata, results: List[List[WriteResult]]) -> None:
     """
@@ -213,26 +217,14 @@ def populate_metadata_with_write_results(md: Metadata, results: List[List[WriteR
         md::planner_data with a Dict[MetadataIndex, Any] by aggregating over WriteResults
         md::storage_data with a Dict[MetadataIndex, Any] by aggregating over WriteResults
     """
-    planner_data = dict()
-    storage_data = dict()
 
     for wr_list in results:
         for wr in wr_list:
             item = md.state_dict_metadata[wr.fqn]
             if isinstance(item, TensorStorageMetadata):
-                assert wr.chunk_index is not None
-                item.chunks[wr.chunk_index].size_in_bytes = wr.size_in_bytes
+                item.chunks[get_chunk_index(item.chunks, wr.chunk_offset)].size_in_bytes = wr.size_in_bytes
             else:
                 item.size_in_bytes = wr.size_in_bytes
-            if wr.planner_data is not None:
-                planner_data[MetadataIndex(wr.fqn, wr.chunk_index)] = wr.planner_data
-            if wr.storage_data is not None:
-                storage_data[MetadataIndex(wr.fqn, wr.chunk_index)] = wr.storage_data
-
-    if len(planner_data) > 0:
-        md.planner_data = planner_data
-    if len(storage_data) > 0:
-        md.storage_data = storage_data
 
 def _create_shard_metadata(size: torch.Size) -> ShardMetadata:
     return ShardMetadata(
@@ -260,7 +252,6 @@ def _create_sharded_read_items(
     fqn: str,
     checkpoint_md: TensorStorageMetadata,
     local_shards: List[Shard],
-    metadata: Metadata
 ) -> List[ReadItem]:
 
     read_items = []
@@ -292,35 +283,25 @@ def _create_sharded_read_items(
                 dest_offsets.append(offset_for_current_tensor)
                 lengths.append(length)
 
-            item_idx = MetadataIndex(fqn, idx)
-            planner_data, storage_data = _get_extra_metadata(metadata, item_idx)
-
             read_items.append(
                 ReadItem(
                     fqn=fqn,
                     chunk=_chunk_for_sharmd(shard.metadata),
-                    chunk_index=idx,
                     storage_offsets=torch.Size(storage_offsets),
                     dest_offsets=torch.Size(dest_offsets),
                     lengths=torch.Size(lengths),
-                    planner_data=planner_data,
-                    storage_data=storage_data,
                 )
             )
     return read_items
 
 
-def create_read_items(metadata: Metadata, fqn: str, md: STORAGE_TYPES, obj: Any) ->List[ReadItem]:
+def create_read_items(fqn: str, md: STORAGE_TYPES, obj: Any) ->List[ReadItem]:
     if isinstance(md, BytesStorageMetadata):
-        item_idx = MetadataIndex(fqn, None)
-        planner_data, storage_data = _get_extra_metadata(metadata, item_idx)
         return [ReadItem(
             fqn=fqn,
             storage_offsets=torch.Size([0]),
             dest_offsets=torch.Size([0]),
             lengths=torch.Size([md.size_in_bytes]),
-            planner_data=planner_data,
-            storage_data=storage_data,
         )]
 
     elif isinstance(obj, ShardedTensor):
@@ -336,8 +317,7 @@ def create_read_items(metadata: Metadata, fqn: str, md: STORAGE_TYPES, obj: Any)
     return _create_sharded_read_items(
         fqn,
         md,
-        local_shards,
-        metadata)
+        local_shards)
 
 def create_default_read_plan(
     state_dict: Dict[str, Any],

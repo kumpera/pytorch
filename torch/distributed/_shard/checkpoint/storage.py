@@ -11,6 +11,7 @@ from enum import Enum, auto
 from .metadata import (
     ChunkStorageMetadata,
     Metadata,
+    MetadataIndex,
     TensorInfo,
 )
 
@@ -41,11 +42,6 @@ class WriteItem:
     # Next two valid if this is a tensor write
     chunk: Optional[ChunkStorageMetadata] = None
     tensor_info: Optional[TensorInfo] = None
-    # This is the index into Metadata
-    chunk_index: Optional[int] = None
-
-    planner_data: Any = None
-    storage_data: Any = None
 
     @property
     def is_tensor(self):
@@ -64,11 +60,13 @@ class WriteItem:
 class WriteResult:
     fqn: str
     # For tensor writes
-    chunk_index: Optional[int]
-
+    chunk_offset: Optional[torch.Size]
     size_in_bytes: int
-    planner_data: Any
     storage_data: Any
+
+    @property
+    def index(self) -> MetadataIndex:
+        return MetadataIndex(fqn=self.fqn, offset=self.chunk_offset)
 
 @dataclass
 class SavePlan:
@@ -88,10 +86,9 @@ class ReadItem:
 
     # This allows to locate a shard in a ST
     chunk: Optional[ChunkStorageMetadata] = None
-    chunk_index: Optional[int] = None
 
-    planner_data: Any = None
-    storage_data: Any = None
+    # planner_data: Any = None
+    # storage_data: Any = None
 
     @property
     def is_tensor(self):
@@ -100,6 +97,11 @@ class ReadItem:
     @property
     def is_bytesio(self):
         return self.chunk is None
+
+    @property
+    def index(self) -> MetadataIndex:
+        offset = self.chunk.offsets if self.chunk is not None else None
+        return MetadataIndex(fqn=self.fqn, offset=offset)
 
 STATE_DICT_TYPE = Dict[str, Any]
 
@@ -280,7 +282,7 @@ class StorageWriter(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def finish(self, metadata: Metadata) -> None:
+    def finish(self, metadata: Metadata, results: List[List[WriteResult]]) -> None:
         """
         Writes the metadata and marks the current checkpoint as sucessfull.
 
@@ -329,7 +331,11 @@ class StorageReader(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def prepare_local_plan(self, metadata: Metadata, plan: LoadPlan) -> LoadPlan:
+    def init(self, metadata: Metadata) -> None:
+        pass
+
+    @abc.abstractmethod
+    def prepare_local_plan(self, plan: LoadPlan) -> LoadPlan:
         pass
 
     @abc.abstractmethod
