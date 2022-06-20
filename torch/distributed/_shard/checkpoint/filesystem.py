@@ -121,10 +121,6 @@ class FileSystemWriter(StorageWriter):
                         length,
                         _StorageInfo(file_name, offset, length)
                     ))
-                    chunk_offset=write_item.chunk.offsets if write_item.chunk is not None else None
-                    dd = planner.resolve_data(write_item)
-                    extra = dd.shape if isinstance(dd, torch.Tensor) else "bytes"
-                    # print(f">ZZ>> {write_item.fqn}::{chunk_offset} {_StorageInfo(file_name, offset, length)} - {extra}")
 
                 os.fsync(w.fileno())
 
@@ -202,27 +198,21 @@ class FileSystemReader(StorageReader):
         for read_item in plan.items:
             item_md = self.storage_data[read_item.index]
             path = item_md.relative_path
-            # print(f">>> {read_item.index} {item_md}")
-            # path = cast(_StorageInfo, read_item.storage_data).relative_path
             per_file.setdefault(path, []).append(read_item)
 
         for relative_path, reqs in per_file.items():
             with (self.path / relative_path).open("rb") as file:
                 # TODO sort by offset and cache the reading
                 for req in reqs:
-                    # file_slice = self._slice_file(file, req.storage_data)
                     item_md = self.storage_data[req.index]
-                    # print(f"processing {req.index} -> {item_md}")
                     file_slice = self._slice_file(file, item_md)
 
                     if req.is_bytesio:
                         planner.write_bytes(req, file_slice)
                     else:
                         tensor = cast(Tensor, torch.load(file_slice, map_location="cpu"))
-                        # print(f"loaded {tensor.shape} narrow to {req.storage_offsets} / {req.lengths}")
                         tensor = tensor_narrow_n(tensor, req.storage_offsets, req.lengths)
                         target_tensor = planner.resolve_tensor(req)
-
 
                         assert (
                             target_tensor.size() == tensor.size()

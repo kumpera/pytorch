@@ -19,12 +19,10 @@ from .metadata import (
 """"
 What's next:
 
-Move to MetadataIndex instead of 3 odd fields
-Fix the layering problem that's create_read_items
-Make dist-cp implementable with just super() + customization
-    Maybe not possible?
-
-WriteItem / chunk / tensor_info into a single field or in a subclass (?)
+Make default plans decompose resolve in lookup + prepare steps.
+WriteItem / chunk / tensor_info into a single field.
+Add and use index hints for reading.
+Write/update spec
 
 """
 
@@ -111,6 +109,7 @@ class ReadItem:
     @property
     def is_bytesio(self):
         return self.type == LoadItemType.BYTE_IO
+
 
 STATE_DICT_TYPE = Dict[str, Any]
 
