@@ -4,7 +4,6 @@ from typing import List, Tuple, Dict, Any, Union, cast
 
 import torch
 from torch import Tensor
-import torch.distributed as dist
 
 from torch.distributed._shard.sharded_tensor import (
     ShardedTensor,
@@ -284,12 +283,12 @@ def _create_sharded_read_items(
                 lengths.append(length)
 
             read_items.append(
-                ReadItem(
+                ReadItem.create_for_tensor(
                     fqn=fqn,
+                    storage_offsets=storage_offsets,
+                    dest_offsets=dest_offsets,
+                    lengths=lengths,
                     chunk=_chunk_for_sharmd(shard.metadata),
-                    storage_offsets=torch.Size(storage_offsets),
-                    dest_offsets=torch.Size(dest_offsets),
-                    lengths=torch.Size(lengths),
                 )
             )
     return read_items
@@ -297,12 +296,7 @@ def _create_sharded_read_items(
 
 def create_read_items(fqn: str, md: STORAGE_TYPES, obj: Any) ->List[ReadItem]:
     if isinstance(md, BytesStorageMetadata):
-        return [ReadItem(
-            fqn=fqn,
-            storage_offsets=torch.Size([0]),
-            dest_offsets=torch.Size([0]),
-            lengths=torch.Size([md.size_in_bytes]),
-        )]
+        return [ReadItem.create_for_byteio(fqn, 0, 0, md.size_in_bytes)]
 
     elif isinstance(obj, ShardedTensor):
         local_shards = obj.local_shards()

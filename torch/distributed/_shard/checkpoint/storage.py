@@ -19,8 +19,6 @@ from .metadata import (
 """"
 What's next:
 
-Remove _data items from Read/Write/Item
-Create LoadItemType
 Move to MetadataIndex instead of 3 odd fields
 Fix the layering problem that's create_read_items
 Make dist-cp implementable with just super() + customization
@@ -74,9 +72,15 @@ class SavePlan:
     storage_data: Any = None
     planner_data: Any = None
 
+
+class LoadItemType(Enum):
+    TENSOR = auto()
+    BYTE_IO = auto()
+
 @dataclass
 class ReadItem:
     fqn: str
+    type: LoadItemType
 
     # Offset from tensor found in checkpoint metadata
     storage_offsets: torch.Size
@@ -87,16 +91,35 @@ class ReadItem:
     # This allows to locate a shard in a ST
     chunk: Optional[ChunkStorageMetadata] = None
 
-    # planner_data: Any = None
-    # storage_data: Any = None
+    @classmethod
+    def create_for_byteio(cls, fqn, src_offset, dest_offset, length):
+        return ReadItem(
+            fqn=fqn,
+            type=LoadItemType.BYTE_IO,
+            storage_offsets=torch.Size((src_offset,)),
+            dest_offsets=torch.Size((dest_offset,)),
+            lengths=torch.Size((length,)),
+        )
+
+    @classmethod
+    def create_for_tensor(cls, fqn, storage_offsets, dest_offsets, lengths, chunk):
+        return ReadItem(
+            fqn=fqn,
+            type=LoadItemType.TENSOR,
+            storage_offsets=torch.Size(storage_offsets),
+            dest_offsets=torch.Size(dest_offsets),
+            lengths=torch.Size(lengths),
+            chunk=chunk,
+        )
+
 
     @property
     def is_tensor(self):
-        return self.chunk is not None
+        return self.type == LoadItemType.TENSOR
 
     @property
     def is_bytesio(self):
-        return self.chunk is None
+        return self.type == LoadItemType.BYTE_IO
 
     @property
     def index(self) -> MetadataIndex:
