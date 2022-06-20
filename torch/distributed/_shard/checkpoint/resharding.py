@@ -160,19 +160,19 @@ def create_default_metadata_only_plan(state_dict: Dict[str, Any]) -> SavePlan:
             requests.append(_create_for_bytesio(fqn, obj))
     return SavePlan(requests)
 
-def create_write_entry(fqn: str, obj: Any) -> List[WriteItem]:
-    if isinstance(obj, ShardedTensor):
-        return [_create_for_shard(fqn, obj, shard) for shard in obj.local_shards()]
-    elif isinstance(obj, Tensor):
-        return [_create_for_tensor(fqn, obj)]
+def create_write_items(fqn: str, object: Any) -> List[WriteItem]:
+    if isinstance(object, ShardedTensor):
+        return [_create_for_shard(fqn, object, shard) for shard in object.local_shards()]
+    elif isinstance(object, Tensor):
+        return [_create_for_tensor(fqn, object)]
     else:
-       return [_create_for_bytesio(fqn, obj)]
+       return [_create_for_bytesio(fqn, object)]
 
 def create_default_local_plan(state_dict: Dict[str, Any], is_coordinator: bool):
     requests = []
     for fqn, obj in state_dict.items():
         if isinstance(obj, ShardedTensor) or is_coordinator:
-            requests += create_write_entry(fqn, obj)
+            requests += create_write_items(fqn, obj)
     return SavePlan(requests)
 
 def create_default_global_plan(all_plans: List[SavePlan]) -> Tuple[List[SavePlan], Metadata]:
@@ -310,7 +310,7 @@ def _create_sharded_read_items(
     return read_items
 
 
-def create_read_items(metadata: Metadata, fqn: str, md: STORAGE_TYPES, obj: Any):
+def create_read_items(metadata: Metadata, fqn: str, md: STORAGE_TYPES, obj: Any) ->List[ReadItem]:
     if isinstance(md, BytesStorageMetadata):
         item_idx = MetadataIndex(fqn, None)
         planner_data, storage_data = _get_extra_metadata(metadata, item_idx)
@@ -381,7 +381,6 @@ def default_resolve_data(state_dict, fqn, chunk, is_bytesio):
         torch.save(obj, bytes)
         obj = bytes
     return obj
-
 
 class DefaultSavePlanner(SavePlanner):
     def init(self, state_dict: Dict[str, Any], is_coordinator: bool) -> None:
