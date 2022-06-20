@@ -105,8 +105,10 @@ def load_state_dict(
     def local_step():
         metadata = storage_reader.read_metadata()
         planner.init(state_dict, metadata, distW.is_coordinator)
+        storage_reader.init(metadata)
+
         local_plan = planner.create_local_plan()
-        local_plan = storage_reader.prepare_local_plan(metadata, local_plan)
+        local_plan = storage_reader.prepare_local_plan(local_plan)
         return local_plan
 
     def global_step(all_local_plans):

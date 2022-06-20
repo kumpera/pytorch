@@ -6,10 +6,8 @@ import io
 import torch.distributed as dist
 
 from .resharding import (
-    create_default_local_plan,
     create_default_global_plan,
     create_default_metadata_only_plan,
-    populate_metadata_with_write_results,
     DefaultSavePlanner
 )
 
@@ -113,7 +111,7 @@ def save_state_dict(
 
     def finish_checkpoint(all_results):
         metadata = planner.create_checkpoint_metadata(all_results)
-        storage_writer.finish(metadata=metadata)
+        storage_writer.finish(metadata=metadata, results=all_results)
         return metadata
 
     return distW.map_reduce("write", write_data, finish_checkpoint)

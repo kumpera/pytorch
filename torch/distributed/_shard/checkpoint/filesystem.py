@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .metadata import (
     Metadata,
+    MetadataIndex,
 )
 from .storage import (
     LoadPlanner,
@@ -44,9 +45,8 @@ class _StoragePrefix:
 def result_from_write_item(item: WriteItem, size_in_bytes, storage_data) -> WriteResult:
     return WriteResult(
         fqn=item.fqn,
-        chunk_index=item.chunk_index,
+        chunk_offset=item.chunk.offsets if item.chunk is not None else None,
         size_in_bytes=size_in_bytes,
-        planner_data=item.planner_data,
         storage_data=storage_data)
 
 
@@ -122,6 +122,11 @@ class FileSystemWriter(StorageWriter):
                         length,
                         _StorageInfo(file_name, offset, length)
                     ))
+                    chunk_offset=write_item.chunk.offsets if write_item.chunk is not None else None
+                    dd = planner.resolve_data(write_item)
+                    extra = dd.shape if isinstance(dd, torch.Tensor) else "bytes"
+                    # print(f">ZZ>> {write_item.fqn}::{chunk_offset} {_StorageInfo(file_name, offset, length)} - {extra}")
+
                 os.fsync(w.fileno())
 
         else:
@@ -144,7 +149,13 @@ class FileSystemWriter(StorageWriter):
     def prepare(self) -> None:
         self.path.mkdir(parents=True, exist_ok=True)
 
-    def finish(self, metadata: Metadata) -> None:
+    def finish(self, metadata: Metadata, results: List[List[WriteResult]]) -> None:
+        storage_md = dict()
+        for wr_list in results:
+            storage_md.update({
+                wr.index: wr.storage_data for wr in wr_list
+            })
+        metadata.storage_data = storage_md
         with (self.path / ".metadata.tmp").open("wb") as metadata_file:
             pickle.dump(metadata, metadata_file)
             os.fsync(metadata_file.fileno())
@@ -174,6 +185,7 @@ class FileSystemReader(StorageReader):
     def __init__(self, path: Union[str, os.PathLike]) -> None:
         super().__init__()
         self.path = Path(path)
+        self.storage_data: Dict[MetadataIndex, _StorageInfo] = dict()
 
     def _slice_file(self, file, sinfo: _StorageInfo):
         return SlicedBufferedReader(
@@ -186,25 +198,32 @@ class FileSystemReader(StorageReader):
         plan: LoadPlan,
         planner: LoadPlanner
     ) -> Future[None]:
-
         # group requests by file
         per_file: Dict[str, List[ReadItem]] = dict()
         for read_item in plan.items:
-            path = cast(_StorageInfo, read_item.storage_data).relative_path
+            item_md = self.storage_data[read_item.index]
+            path = item_md.relative_path
+            # print(f">>> {read_item.index} {item_md}")
+            # path = cast(_StorageInfo, read_item.storage_data).relative_path
             per_file.setdefault(path, []).append(read_item)
 
         for relative_path, reqs in per_file.items():
             with (self.path / relative_path).open("rb") as file:
                 # TODO sort by offset and cache the reading
                 for req in reqs:
-                    file_slice = self._slice_file(file, req.storage_data)
+                    # file_slice = self._slice_file(file, req.storage_data)
+                    item_md = self.storage_data[req.index]
+                    # print(f"processing {req.index} -> {item_md}")
+                    file_slice = self._slice_file(file, item_md)
 
                     if req.is_bytesio:
                         planner.write_bytes(req, file_slice)
                     else:
                         tensor = cast(Tensor, torch.load(file_slice, map_location="cpu"))
+                        # print(f"loaded {tensor.shape} narrow to {req.storage_offsets} / {req.lengths}")
                         tensor = tensor_narrow_n(tensor, req.storage_offsets, req.lengths)
                         target_tensor = planner.resolve_tensor(req)
+
 
                         assert (
                             target_tensor.size() == tensor.size()
@@ -221,7 +240,11 @@ class FileSystemReader(StorageReader):
             md = pickle.load(metadata_file)
             return md
 
-    def prepare_local_plan(self, metadata: Metadata, plan: LoadPlan) -> LoadPlan:
+    def init(self, metadata: Metadata) -> None:
+        self.storage_data = metadata.storage_data
+        assert self.storage_data is not None
+
+    def prepare_local_plan(self, plan: LoadPlan) -> LoadPlan:
         return plan
 
     def prepare_global_plan(self, global_plan: List[LoadPlan]) -> List[LoadPlan]:
