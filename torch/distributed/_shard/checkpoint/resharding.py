@@ -181,7 +181,7 @@ def create_default_local_plan(state_dict: Dict[str, Any], is_coordinator: bool):
 
 def create_default_global_plan(all_plans: List[SavePlan]) -> Tuple[List[SavePlan], Metadata]:
     """
-    The default plan creates a Metadata object with -1 as size_in_bytes
+    The default plan creates a Metadata object with -1 as size_in_bytes.
     """
     md: Dict[str, STORAGE_TYPES]= dict()
 
@@ -202,15 +202,17 @@ def create_default_global_plan(all_plans: List[SavePlan]) -> Tuple[List[SavePlan
                     ))
                 )
 
+                item.index = MetadataIndex(
+                    fqn=item.index.fqn,
+                    offset=item.index.offset,
+                    index=len(tensor_md.chunks))
                 assert item.chunk is not None, f"Cannot create MD for tensor without bounds. FQN: {item.index.fqn}"
                 tensor_md.chunks.append(item.chunk)
-                # FIXME update item.index to include index
 
     return (all_plans, Metadata(md))
 
-def get_chunk_index(list: List[ChunkStorageMetadata], index: MetadataIndex):
+def find_chunk_in_list(list: List[ChunkStorageMetadata], index: MetadataIndex):
     # index fast path
-    print(f"XXXX {index.index is not None}")
     if index.index is not None and list[index.index] == index.offset:
         return index.index
 
@@ -224,12 +226,11 @@ def populate_metadata_with_write_results(md: Metadata, results: List[List[WriteR
     By default we populate the following:
         size_in_bytes of all leaf items
     """
-
     for wr_list in results:
         for wr in wr_list:
             item = md.state_dict_metadata[wr.index.fqn]
             if isinstance(item, TensorStorageMetadata):
-                item.chunks[get_chunk_index(item.chunks, wr.index)].size_in_bytes = wr.size_in_bytes
+                item.chunks[find_chunk_in_list(item.chunks, wr.index)].size_in_bytes = wr.size_in_bytes
             else:
                 item.size_in_bytes = wr.size_in_bytes
 
@@ -264,7 +265,7 @@ def _create_sharded_read_items(
     read_items = []
     # this is a naive quadratic algo that can be optimized later
     for shard in local_shards:
-        for idx, storage_md in enumerate(checkpoint_md.chunks):
+        for storage_md in checkpoint_md.chunks:
             shard_md_from_storage = ShardMetadata(
                 shard_sizes=list(storage_md.sizes),
                 shard_offsets=list(storage_md.offsets),
@@ -291,6 +292,7 @@ def _create_sharded_read_items(
                 lengths.append(length)
 
             read_items.append(
+                # FIXME pass the local shard index
                 ReadItem.create_for_tensor(
                     fqn=fqn,
                     storage_offsets=storage_offsets,
@@ -332,7 +334,7 @@ def create_default_read_plan(
     """
     for fqn, obj in state_dict.items():
         md = metadata.state_dict_metadata[fqn]
-        requests += create_read_items(metadata, fqn, md, obj)
+        requests += create_read_items(fqn, md, obj)
 
     return LoadPlan(requests)
 
@@ -368,13 +370,15 @@ class DefaultSavePlanner(SavePlanner):
         self.is_coordinator = is_coordinator
 
     def create_local_plan(self) -> SavePlan:
-        return create_default_local_plan(self.state_dict, self.is_coordinator)
+        self.plan = create_default_local_plan(self.state_dict, self.is_coordinator)
+        return self.plan
 
     def create_global_plan(self, all_plans: List[SavePlan]) -> List[SavePlan]:
         self.global_plan, self.metadata = create_default_global_plan(all_plans)
         return self.global_plan
 
     def finish_plan(self, new_plan: SavePlan) -> SavePlan:
+        self.plan = new_plan
         return new_plan
 
     def create_checkpoint_metadata(self, all_results: List[List[WriteResult]]) -> Metadata:
