@@ -44,8 +44,7 @@ class _StoragePrefix:
 
 def result_from_write_item(item: WriteItem, size_in_bytes, storage_data) -> WriteResult:
     return WriteResult(
-        fqn=item.fqn,
-        chunk_offset=item.chunk.offsets if item.chunk is not None else None,
+        index=item.index,
         size_in_bytes=size_in_bytes,
         storage_data=storage_data)
 

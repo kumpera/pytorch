@@ -23,8 +23,10 @@ Move to MetadataIndex instead of 3 odd fields
 Fix the layering problem that's create_read_items
 Make dist-cp implementable with just super() + customization
     Maybe not possible?
-"""
 
+WriteItem / chunk / tensor_info into a single field or in a subclass (?)
+
+"""
 
 class WriteItemType(Enum):
     TENSOR = auto()
@@ -33,8 +35,7 @@ class WriteItemType(Enum):
 
 @dataclass
 class WriteItem:
-    #this is the FQN in the metadata
-    fqn: str
+    index: MetadataIndex
     type: WriteItemType
 
     # Next two valid if this is a tensor write
@@ -53,18 +54,12 @@ class WriteItem:
     def is_shard(self):
         return self.type == WriteItemType.SHARD
 
-
 @dataclass
 class WriteResult:
-    fqn: str
-    # For tensor writes
-    chunk_offset: Optional[torch.Size]
+    index: MetadataIndex
+
     size_in_bytes: int
     storage_data: Any
-
-    @property
-    def index(self) -> MetadataIndex:
-        return MetadataIndex(fqn=self.fqn, offset=self.chunk_offset)
 
 @dataclass
 class SavePlan:
@@ -79,7 +74,7 @@ class LoadItemType(Enum):
 
 @dataclass
 class ReadItem:
-    fqn: str
+    index: MetadataIndex
     type: LoadItemType
 
     # Offset from tensor found in checkpoint metadata
@@ -88,13 +83,10 @@ class ReadItem:
     dest_offsets: torch.Size
     lengths: torch.Size
 
-    # This allows to locate a shard in a ST
-    chunk: Optional[ChunkStorageMetadata] = None
-
     @classmethod
     def create_for_byteio(cls, fqn, src_offset, dest_offset, length):
         return ReadItem(
-            fqn=fqn,
+            index=MetadataIndex(fqn),
             type=LoadItemType.BYTE_IO,
             storage_offsets=torch.Size((src_offset,)),
             dest_offsets=torch.Size((dest_offset,)),
@@ -104,12 +96,11 @@ class ReadItem:
     @classmethod
     def create_for_tensor(cls, fqn, storage_offsets, dest_offsets, lengths, chunk):
         return ReadItem(
-            fqn=fqn,
+            index=MetadataIndex(fqn, chunk.offsets),
             type=LoadItemType.TENSOR,
             storage_offsets=torch.Size(storage_offsets),
             dest_offsets=torch.Size(dest_offsets),
             lengths=torch.Size(lengths),
-            chunk=chunk,
         )
 
 
@@ -120,11 +111,6 @@ class ReadItem:
     @property
     def is_bytesio(self):
         return self.type == LoadItemType.BYTE_IO
-
-    @property
-    def index(self) -> MetadataIndex:
-        offset = self.chunk.offsets if self.chunk is not None else None
-        return MetadataIndex(fqn=self.fqn, offset=offset)
 
 STATE_DICT_TYPE = Dict[str, Any]
 
