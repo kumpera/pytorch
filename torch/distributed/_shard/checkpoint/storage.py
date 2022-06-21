@@ -16,15 +16,6 @@ from .metadata import (
 )
 
 
-""""
-What's next:
-
-WriteItem / chunk / tensor_info into a single field.
-Add and use index hints for reading.
-Write/update spec
-
-"""
-
 class WriteItemType(Enum):
     TENSOR = auto()
     SHARD = auto()
@@ -85,9 +76,9 @@ class ReadItem:
     lengths: torch.Size
 
     @classmethod
-    def create_for_byteio(cls, fqn, src_offset, dest_offset, length):
+    def create_for_byteio(cls, index, src_offset, dest_offset, length):
         return ReadItem(
-            index=MetadataIndex(fqn),
+            index=index,
             type=LoadItemType.BYTE_IO,
             storage_offsets=torch.Size((src_offset,)),
             dest_offsets=torch.Size((dest_offset,)),
@@ -95,9 +86,9 @@ class ReadItem:
         )
 
     @classmethod
-    def create_for_tensor(cls, fqn, storage_offsets, dest_offsets, lengths, chunk):
+    def create_for_tensor(cls, index, storage_offsets, dest_offsets, lengths):
         return ReadItem(
-            index=MetadataIndex(fqn, chunk.offsets),
+            index=index,
             type=LoadItemType.TENSOR,
             storage_offsets=torch.Size(storage_offsets),
             dest_offsets=torch.Size(dest_offsets),

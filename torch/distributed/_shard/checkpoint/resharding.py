@@ -4,6 +4,7 @@ from typing import List, Tuple, Dict, Any, Union, cast
 
 import torch
 from torch import Tensor
+from torch import distributed
 
 from torch.distributed._shard.sharded_tensor import (
     ShardedTensor,
@@ -229,13 +230,12 @@ def find_shard(tensor: ShardedTensor, index: MetadataIndex) -> Shard:
     shards = tensor.local_shards()
     # index fast path
     if index.index is not None:
-        if len(shards) > index.index and shards[index.index] == index.offset:
-            return index.index
+        if len(shards) > index.index and torch.Size(shards[index.index].metadata.shard_offsets) == index.offset:
+            return shards[index.index]
 
     for shard in shards:
         if torch.Size(shard.metadata.shard_offsets) == index.offset:
             return shard
-
     raise ValueError(f"could not find shard at '{index.offset}' for FQN: '{index.fqn}'")
 
 def find_object(state_dict: Dict[str, Any], index: MetadataIndex) -> Any:
@@ -279,7 +279,7 @@ def _create_sharded_read_items(
 
     read_items = []
     # this is a naive quadratic algo that can be optimized later
-    for shard in local_shards:
+    for idx, shard in enumerate(local_shards):
         for storage_md in checkpoint_md.chunks:
             shard_md_from_storage = ShardMetadata(
                 shard_sizes=list(storage_md.sizes),
@@ -309,11 +309,10 @@ def _create_sharded_read_items(
             read_items.append(
                 # FIXME pass the local shard index
                 ReadItem.create_for_tensor(
-                    fqn=fqn,
+                    index=MetadataIndex(fqn, torch.Size(shard.metadata.shard_offsets), idx),
                     storage_offsets=storage_offsets,
                     dest_offsets=dest_offsets,
                     lengths=lengths,
-                    chunk=_chunk_for_sharmd(shard.metadata),
                 )
             )
     return read_items
@@ -321,7 +320,12 @@ def _create_sharded_read_items(
 
 def create_read_items(fqn: str, md: STORAGE_TYPES, obj: Any) ->List[ReadItem]:
     if isinstance(md, BytesStorageMetadata):
-        return [ReadItem.create_for_byteio(fqn, 0, 0, md.size_in_bytes)]
+        return [ReadItem.create_for_byteio(
+            index=MetadataIndex(fqn),
+            src_offset=0,
+            dest_offset=0,
+            length=md.size_in_bytes
+        )]
 
     elif isinstance(obj, ShardedTensor):
         local_shards = obj.local_shards()
