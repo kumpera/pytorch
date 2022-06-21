@@ -33,7 +33,7 @@ from .storage import (
     WriteItemType,
     SavePlanner,
     WriteResult,
-
+    TensorWriteData,
     LoadPlan,
     ReadItem,
     LoadPlanner,
@@ -102,7 +102,6 @@ def _tensor_props_for(tensor: torch.Tensor) -> TensorProperties:
         pin_memory=tensor.is_pinned()
     )
 
-
 def _chunk_for_sharmd(shard_md: ShardMetadata) -> ChunkStorageMetadata:
     return ChunkStorageMetadata(
         offsets=torch.Size(shard_md.shard_offsets),
@@ -110,27 +109,26 @@ def _chunk_for_sharmd(shard_md: ShardMetadata) -> ChunkStorageMetadata:
         size_in_bytes=-1,
     )
 
-def _create_for_shardmd(fqn: str, sharded_tensor: ShardedTensor, shard_md: ShardMetadata) -> WriteItem:
-    return WriteItem(
-        fqn=fqn,
-        type=WriteItemType.SHARD,
+def _sharded_tensor_metadata(sharded_tensor: ShardedTensor, shard_md: ShardMetadata) -> TensorWriteData:
+    return TensorWriteData(
         chunk=_chunk_for_sharmd(shard_md),
-        tensor_info=_sharded_tensor_props_for(sharded_tensor),
+        info=_sharded_tensor_props_for(sharded_tensor)
+    )
+
+def _create_for_shardmd(fqn: str, sharded_tensor: ShardedTensor, shard_md: ShardMetadata) -> WriteItem:
+    offsets=torch.Size(shard_md.shard_offsets)
+    return WriteItem(
+        index=MetadataIndex(fqn, offsets),
+        type=WriteItemType.SHARD,
+        tensor_data=_sharded_tensor_metadata(sharded_tensor, shard_md),
     )
 
 def _create_for_shard(fqn: str, sharded_tensor: ShardedTensor, shard: Shard) -> WriteItem:
     offsets=torch.Size(shard.metadata.shard_offsets)
-    sizes=torch.Size(shard.metadata.shard_sizes)
-
     return WriteItem(
         index=MetadataIndex(fqn, offsets),
         type=WriteItemType.SHARD,
-        chunk=ChunkStorageMetadata(
-            offsets=offsets,
-            sizes=sizes,
-            size_in_bytes=-1,
-        ),
-        tensor_info=_sharded_tensor_props_for(sharded_tensor),
+        tensor_data=_sharded_tensor_metadata(sharded_tensor, shard.metadata),
     )
 
 def _create_for_tensor(fqn: str, tensor: torch.Tensor) -> WriteItem:
@@ -138,12 +136,14 @@ def _create_for_tensor(fqn: str, tensor: torch.Tensor) -> WriteItem:
     return WriteItem(
         index=MetadataIndex(fqn, offsets),
         type=WriteItemType.TENSOR,
-        chunk=ChunkStorageMetadata(
-            offsets=offsets,
-            sizes=tensor.size(),
-            size_in_bytes=-1,
-        ),
-        tensor_info=TensorInfo(_tensor_props_for(tensor), tensor.size()),
+        tensor_data=TensorWriteData(
+            chunk=ChunkStorageMetadata(
+                offsets=offsets,
+                sizes=tensor.size(),
+                size_in_bytes=-1,
+            ),
+            info=TensorInfo(_tensor_props_for(tensor), tensor.size()),
+        )
     )
 
 def _create_for_bytesio(fqn: str, bytes: Any):
@@ -193,11 +193,11 @@ def create_default_global_plan(all_plans: List[SavePlan]) -> Tuple[List[SavePlan
             if item.is_bytesio:
                 md[item.index.fqn] = BytesStorageMetadata(size_in_bytes=-1)
             else:
-                assert item.tensor_info is not None
+                assert item.tensor_data is not None
                 tensor_md = cast(
                     TensorStorageMetadata,
                     md.setdefault(item.index.fqn, TensorStorageMetadata(
-                        properties=item.tensor_info,
+                        properties=item.tensor_data.info,
                         chunks=[],
                     ))
                 )
@@ -206,20 +206,44 @@ def create_default_global_plan(all_plans: List[SavePlan]) -> Tuple[List[SavePlan
                     fqn=item.index.fqn,
                     offset=item.index.offset,
                     index=len(tensor_md.chunks))
-                assert item.chunk is not None, f"Cannot create MD for tensor without bounds. FQN: {item.index.fqn}"
-                tensor_md.chunks.append(item.chunk)
+                assert item.tensor_data.chunk is not None, f"Cannot create MD for tensor without bounds. FQN: {item.index.fqn}"
+                tensor_md.chunks.append(item.tensor_data.chunk)
 
     return (all_plans, Metadata(md))
 
-def find_chunk_in_list(list: List[ChunkStorageMetadata], index: MetadataIndex):
+def find_chunk_index(list: List[ChunkStorageMetadata], index: MetadataIndex) -> int:
     # index fast path
-    if index.index is not None and list[index.index] == index.offset:
-        return index.index
+    if index.index is not None:
+        if len(list) > index.index and list[index.index] == index.offset:
+            return index.index
 
-    for i,c in enumerate(list):
+    for i, c in enumerate(list):
         if c.offsets == index.offset:
             return i
     raise ValueError(f"Offset {index.offset} not found")
+
+def find_shard(tensor: ShardedTensor, index: MetadataIndex) -> Shard:
+    if index.offset is None:
+        raise ValueError(f"Cannot lookup {index.fqn} since its a ShardedTensor and no offset was provided")
+
+    shards = tensor.local_shards()
+    # index fast path
+    if index.index is not None:
+        if len(shards) > index.index and shards[index.index] == index.offset:
+            return index.index
+
+    for shard in shards:
+        if torch.Size(shard.metadata.shard_offsets) == index.offset:
+            return shard
+
+    raise ValueError(f"could not find shard at '{index.offset}' for FQN: '{index.fqn}'")
+
+def find_object(state_dict: Dict[str, Any], index: MetadataIndex) -> Any:
+    obj = state_dict[index.fqn]
+    if isinstance(obj, ShardedTensor):
+        return find_shard(obj, index).tensor
+    return obj
+
 
 def populate_metadata_with_write_results(md: Metadata, results: List[List[WriteResult]]) -> None:
     """
@@ -230,7 +254,7 @@ def populate_metadata_with_write_results(md: Metadata, results: List[List[WriteR
         for wr in wr_list:
             item = md.state_dict_metadata[wr.index.fqn]
             if isinstance(item, TensorStorageMetadata):
-                item.chunks[find_chunk_in_list(item.chunks, wr.index)].size_in_bytes = wr.size_in_bytes
+                item.chunks[find_chunk_index(item.chunks, wr.index)].size_in_bytes = wr.size_in_bytes
             else:
                 item.size_in_bytes = wr.size_in_bytes
 
@@ -245,15 +269,6 @@ def _create_shard_for(tensor: Tensor) -> Shard:
         tensor=tensor,
         metadata=_create_shard_metadata(tensor.size())
     )
-
-def _get_extra_metadata(md: Metadata, key: MetadataIndex):
-    planner_data = None
-    if isinstance(md.planner_data, Dict):
-        planner_data = md.planner_data.get(key, None)
-    storage_data = None
-    if isinstance(md.storage_data, Dict):
-        storage_data = md.storage_data.get(key, None)
-    return (planner_data, storage_data)
 
 
 def _create_sharded_read_items(
@@ -341,28 +356,6 @@ def create_default_read_plan(
 def create_default_global_read_plan(all_plans: List[LoadPlan]) -> List[LoadPlan]:
     return all_plans
 
-def default_item_lookup(state_dict, index: MetadataIndex):
-    obj = state_dict[index.fqn]
-    if not isinstance(obj, ShardedTensor):
-        return obj
-
-    if index.offset is None:
-        raise ValueError(f"Cannot lookup {index.fqn} since its a ShardedTensor and no offset was provided")
-
-    for shard in obj.local_shards():
-        if torch.Size(shard.metadata.shard_offsets) == index.offset:
-            return shard.tensor
-
-    raise ValueError(f"could not find shard at '{index.offset}' for FQN: '{index.fqn}'")
-
-def default_resolve_data(state_dict, fqn, chunk, is_bytesio):
-    obj = default_item_lookup(state_dict, fqn, chunk)
-
-    if is_bytesio:
-        bytes = io.BytesIO()
-        torch.save(obj, bytes)
-        obj = bytes
-    return obj
 
 class DefaultSavePlanner(SavePlanner):
     def init(self, state_dict: Dict[str, Any], is_coordinator: bool) -> None:
@@ -386,8 +379,25 @@ class DefaultSavePlanner(SavePlanner):
         return self.metadata
 
     def resolve_data(self, write_item: WriteItem) -> Union[torch.Tensor, io.BytesIO]:
-        return default_resolve_data(self.state_dict, write_item.fqn, write_item.chunk, write_item.is_bytesio)
- 
+        object = self.lookup_object(write_item.index)
+        return self.transform_object(write_item, object)
+
+    def lookup_object(self, index: MetadataIndex) -> Any:
+        """
+        This is an extension from the planner interface to make it easy to extend the default planner
+        """
+        return find_object(self.state_dict, index)
+
+    def transform_object(self, write_item: WriteItem, object: Any):
+        """
+        This is an extension from the planner interface to make it easy to extend the default planner
+        """
+        if write_item.is_bytesio:
+            bytes = io.BytesIO()
+            torch.save(object, bytes)
+            object = bytes
+        return object
+
 
 class DefaultLoadPlanner(LoadPlanner):
     def init(self, state_dict: STATE_DICT_TYPE, metadata: Metadata, is_coordinator: bool) -> None:
@@ -408,6 +418,17 @@ class DefaultLoadPlanner(LoadPlanner):
         self.state_dict[read_item.index.fqn] = torch.load(value)
 
     def resolve_tensor(self, read_item: ReadItem):
-        tensor = default_item_lookup(self.state_dict, read_item.fqn, read_item.chunk)
-        tensor = tensor_narrow_n(tensor, read_item.dest_offsets, read_item.lengths)
-        return tensor
+        tensor = self.lookup_tensor(read_item.index)
+        return self.transform_tensor(read_item, tensor)
+
+    def lookup_tensor(self, index: MetadataIndex) -> torch.Tensor:
+        """
+        This is an extension from the planner interface to make it easy to extend the default planner
+        """
+        return find_object(self.state_dict, index)
+
+    def transform_tensor(self, read_item: ReadItem, tensor: torch.Tensor):
+        """
+        This is an extension from the planner interface to make it easy to extend the default planner
+        """
+        return tensor_narrow_n(tensor, read_item.dest_offsets, read_item.lengths)

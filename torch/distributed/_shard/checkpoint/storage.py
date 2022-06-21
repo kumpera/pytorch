@@ -19,7 +19,6 @@ from .metadata import (
 """"
 What's next:
 
-Make default plans decompose resolve in lookup + prepare steps.
 WriteItem / chunk / tensor_info into a single field.
 Add and use index hints for reading.
 Write/update spec
@@ -32,13 +31,17 @@ class WriteItemType(Enum):
     BYTE_IO = auto()
 
 @dataclass
+class TensorWriteData:
+    chunk: ChunkStorageMetadata
+    info: TensorInfo
+
+@dataclass
 class WriteItem:
     index: MetadataIndex
     type: WriteItemType
 
-    # Next two valid if this is a tensor write
-    chunk: Optional[ChunkStorageMetadata] = None
-    tensor_info: Optional[TensorInfo] = None
+    # Value present if it's a tensor write
+    tensor_data: Optional[TensorWriteData] = None
 
     @property
     def is_tensor(self):
@@ -115,7 +118,7 @@ STATE_DICT_TYPE = Dict[str, Any]
 
 class SavePlanner(abc.ABC):
     @abc.abstractmethod
-    def init(self, state_dict: Dict[str, Any], is_coordinator: bool) -> None:
+    def init(self, state_dict: STATE_DICT_TYPE, is_coordinator: bool) -> None:
         """
         Intialize this planner to save ``state_dict``.
         """
