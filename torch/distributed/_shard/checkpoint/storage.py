@@ -1,7 +1,6 @@
 import abc
 from dataclasses import dataclass
-from typing import List, Union, Any, Dict, Callable, Tuple, Optional, cast
-from torch.distributed._shard.sharded_tensor import ShardedTensor
+from typing import List, Union, Any, Dict, Optional
 
 import torch
 import io
@@ -118,7 +117,9 @@ class SavePlanner(abc.ABC):
     @abc.abstractmethod
     def create_local_plan(self) -> SavePlan:
         """
-        Compute the save plan for the current rank. This will be aggregated and fed into create_global_plan so any inputs for global planning should be returned from here.
+        Compute the save plan for the current rank.
+        This will be aggregated and passed to create_global_plan.
+        Planner specific data can be passed through SavePlan::planner_data.
 
         This is called on all ranks.
         """
@@ -345,9 +346,5 @@ class StorageReader(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def read_data(self,
-        plan: LoadPlan,
-        planner: LoadPlanner
-    ) -> Future[None]:
+    def read_data(self, plan: LoadPlan, planner: LoadPlanner) -> Future[None]:
         pass
-
