@@ -1,10 +1,8 @@
 import io
-from multiprocessing.sharedctypes import Value
 from typing import List, Tuple, Dict, Any, Union, cast
 
 import torch
 from torch import Tensor
-from torch import distributed
 
 from torch.distributed._shard.sharded_tensor import (
     ShardedTensor,
@@ -117,7 +115,7 @@ def _sharded_tensor_metadata(sharded_tensor: ShardedTensor, shard_md: ShardMetad
     )
 
 def _create_for_shardmd(fqn: str, sharded_tensor: ShardedTensor, shard_md: ShardMetadata) -> WriteItem:
-    offsets=torch.Size(shard_md.shard_offsets)
+    offsets = torch.Size(shard_md.shard_offsets)
     return WriteItem(
         index=MetadataIndex(fqn, offsets),
         type=WriteItemType.SHARD,
@@ -125,7 +123,7 @@ def _create_for_shardmd(fqn: str, sharded_tensor: ShardedTensor, shard_md: Shard
     )
 
 def _create_for_shard(fqn: str, sharded_tensor: ShardedTensor, shard: Shard) -> WriteItem:
-    offsets=torch.Size(shard.metadata.shard_offsets)
+    offsets = torch.Size(shard.metadata.shard_offsets)
     return WriteItem(
         index=MetadataIndex(fqn, offsets),
         type=WriteItemType.SHARD,
@@ -133,7 +131,7 @@ def _create_for_shard(fqn: str, sharded_tensor: ShardedTensor, shard: Shard) -> 
     )
 
 def _create_for_tensor(fqn: str, tensor: torch.Tensor) -> WriteItem:
-    offsets=torch.Size([0] * len(tensor.size()))
+    offsets = torch.Size([0] * len(tensor.size()))
     return WriteItem(
         index=MetadataIndex(fqn, offsets),
         type=WriteItemType.TENSOR,
@@ -171,7 +169,7 @@ def create_write_items(fqn: str, object: Any) -> List[WriteItem]:
     elif isinstance(object, Tensor):
         return [_create_for_tensor(fqn, object)]
     else:
-       return [_create_for_bytesio(fqn, object)]
+        return [_create_for_bytesio(fqn, object)]
 
 def create_default_local_plan(state_dict: Dict[str, Any], is_coordinator: bool):
     requests = []
@@ -184,7 +182,7 @@ def create_default_global_plan(all_plans: List[SavePlan]) -> Tuple[List[SavePlan
     """
     The default plan creates a Metadata object with -1 as size_in_bytes.
     """
-    md: Dict[str, STORAGE_TYPES]= dict()
+    md: Dict[str, STORAGE_TYPES] = dict()
 
     for plan in all_plans:
         for item in plan.items:
@@ -318,7 +316,7 @@ def _create_sharded_read_items(
     return read_items
 
 
-def create_read_items(fqn: str, md: STORAGE_TYPES, obj: Any) ->List[ReadItem]:
+def create_read_items(fqn: str, md: STORAGE_TYPES, obj: Any) -> List[ReadItem]:
     if isinstance(md, BytesStorageMetadata):
         return [ReadItem.create_for_byteio(
             index=MetadataIndex(fqn),
