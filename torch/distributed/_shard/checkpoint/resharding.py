@@ -1,3 +1,4 @@
+import dataclasses
 import io
 from typing import List, Tuple, Dict, Any, Union, cast
 
@@ -205,15 +206,18 @@ def create_default_global_plan(all_plans: List[SavePlan]) -> Tuple[List[SavePlan
     """
     The default plan creates a Metadata object with -1 as size_in_bytes.
     """
-    md: Dict[str, STORAGE_TYPES] = dict()
 
+    md: Dict[str, STORAGE_TYPES] = dict()
+    new_plans = []
     for plan in all_plans:
+        new_items = []
         for item in plan.items:
             if not item.type == WriteItemType.SHARD:
                 assert item.index.fqn not in md
 
             if item.type == WriteItemType.BYTE_IO:
                 md[item.index.fqn] = BytesStorageMetadata(size_in_bytes=-1)
+                new_items.append(item)
             else:
                 assert item.tensor_data is not None
                 tensor_md = cast(
@@ -223,15 +227,14 @@ def create_default_global_plan(all_plans: List[SavePlan]) -> Tuple[List[SavePlan
                         chunks=[],
                     ))
                 )
+                new_index = dataclasses.replace(item.index, index=len(tensor_md.chunks))
+                new_item = dataclasses.replace(item, index=new_index)
+                new_items.append(new_item)
 
-                item.index = MetadataIndex(
-                    fqn=item.index.fqn,
-                    offset=item.index.offset,
-                    index=len(tensor_md.chunks))
                 assert item.tensor_data.chunk is not None, f"Cannot create MD for tensor without bounds. FQN: {item.index.fqn}"
                 tensor_md.chunks.append(item.tensor_data.chunk)
-
-    return (all_plans, Metadata(md))
+        new_plans.append(dataclasses.replace(plan, items=new_items))
+    return (new_plans, Metadata(md))
 
 def find_chunk_index(list: List[ChunkStorageMetadata], index: MetadataIndex) -> int:
     # index fast path
