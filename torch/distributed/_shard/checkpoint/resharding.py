@@ -441,7 +441,7 @@ class DefaultLoadPlanner(LoadPlanner):
     def finish_plan(self, new_plan: LoadPlan) -> LoadPlan:
         return new_plan
 
-    def write_bytes(self, read_item: ReadItem, value: io.BytesIO) -> None:
+    def load_bytes(self, read_item: ReadItem, value: io.BytesIO) -> None:
         self.state_dict[read_item.index.fqn] = torch.load(value)
 
     def resolve_tensor(self, read_item: ReadItem):

@@ -87,10 +87,9 @@ def save_state_dict(
     if planner is None:
         planner = DefaultSavePlanner()
 
-    _ = distW.run_on_coordinator("prepare storage", storage_writer.prepare)
-
     def local_step():
         planner.init(state_dict, is_coordinator)
+        storage_writer.init(is_coordinator)
         local_plan = planner.create_local_plan()
         local_plan = storage_writer.prepare_local_plan(local_plan)
         return local_plan

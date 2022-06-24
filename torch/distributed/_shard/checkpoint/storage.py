@@ -158,7 +158,7 @@ class LoadPlanner:
         pass
 
     @abc.abstractmethod
-    def write_bytes(self, read_item: ReadItem, value: io.BytesIO) -> None:
+    def load_bytes(self, read_item: ReadItem, value: io.BytesIO) -> None:
         pass
 
     @abc.abstractmethod
@@ -170,17 +170,29 @@ class StorageWriter(abc.ABC):
     """
     Interface used by ``save_state_dict`` to write to storage.
 
-    A subclass should expect the following sequence of calls by ``save_state_dict``
+    A StorageWriter instance acts as both the coordinator and the follower
+    in a distributed checkpoint. As part of initialization, each instance
+    is told its role.
 
-    1) (called once globally) prepare()
-    2) prepare_local_plan()
-    3) (called once globally) prepare_global_plan.
-    4) prepare_writes()
-    5) write_data()
-    6) (called once globally) finish().
+    A subclass should expect the following sequence of calls.
 
-    There's a single process that executes methods that are called once globally.
+    1) (all ranks) init()
+    1) (coordinator) prepare()
+    2) (all ranks) prepare_local_plan()
+    3) (coordinator) prepare_global_plan()
+    4) (all ranks) write_data()
+    5) (coordinator) finish()
     """
+
+    @abc.abstractmethod
+    def init(self, is_coordinator: bool) -> None:
+        """
+        Initialize this instance.
+
+        Args:
+            is_coordinator (bool): Whether this instance is reponsible for coordinator all writes
+        """
+        pass
 
     @abc.abstractmethod
     def prepare_local_plan(self, plan: SavePlan) -> SavePlan:
@@ -203,19 +215,6 @@ class StorageWriter(abc.ABC):
         """
         pass
 
-    @abc.abstractmethod
-    def prepare(self) -> None:
-        """
-        Initialize storage to receive the checkpoint.
-
-        This method is called once globally per checkpoint before any other method.
-        This is in contrast to ``prepare_storage`` which is called on each process
-        in parallel.
-
-        Returns:
-            Future to signal intialization is complete.
-        """
-        pass
 
     @abc.abstractmethod
     def write_data(
