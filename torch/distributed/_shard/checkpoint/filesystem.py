@@ -76,11 +76,16 @@ class FileSystemWriter(StorageWriter):
         self.path = Path(path)
         self.single_file_per_rank = single_file_per_rank
 
+    def init(self, is_coordinator: bool) -> None:
+        pass
+
     def prepare_local_plan(self, plan: SavePlan) -> SavePlan:
         # There's no storage input in the local plan
         return plan
 
     def prepare_global_plan(self, global_plan: List[SavePlan]) -> List[SavePlan]:
+        self.path.mkdir(parents=True, exist_ok=True)
+
         new_plans = [
             dataclasses.replace(plan, storage_data=_StoragePrefix(f"__{i}_")) for i, plan in enumerate(global_plan)
         ]
@@ -143,9 +148,6 @@ class FileSystemWriter(StorageWriter):
         fut.set_result(res)
         return fut
 
-    def prepare(self) -> None:
-        self.path.mkdir(parents=True, exist_ok=True)
-
     def finish(self, metadata: Metadata, results: List[List[WriteResult]]) -> None:
         storage_md = dict()
         for wr_list in results:
@@ -161,6 +163,7 @@ class FileSystemWriter(StorageWriter):
 
 
 class SlicedBufferedReader(io.BufferedReader):
+    # TODO override read to handle (-1) correctly
     def __init__(self, base_stream: io.RawIOBase, offset: int, len: int):
         super().__init__(base_stream)
         self.offset = offset
@@ -208,9 +211,10 @@ class FileSystemReader(StorageReader):
                 for req in reqs:
                     item_md = self.storage_data[req.index]
                     file_slice = self._slice_file(file, item_md)
-
                     if req.type == LoadItemType.BYTE_IO:
-                        planner.write_bytes(req, file_slice)
+                        bytes = io.BytesIO(file_slice.read(item_md.length))
+                        bytes.seek(0)
+                        planner.load_bytes(req, bytes)
                     else:
                         tensor = cast(Tensor, torch.load(file_slice, map_location="cpu"))
                         tensor = tensor_narrow_n(tensor, req.storage_offsets, req.lengths)

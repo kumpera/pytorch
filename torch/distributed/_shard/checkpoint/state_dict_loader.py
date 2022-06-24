@@ -126,39 +126,3 @@ def load_state_dict(
         return None
 
     distW.run_on_all_ranks("read", read_data)
-
-
-def _validate_sharded_tensor(
-    tensor_md: ShardedTensorMetadata, checkpoint_md: TensorStorageMetadata
-) -> None:
-    # We assume the incoming tensor has being validated during construction
-
-    # To ensure a checkpoint can satisfy loading a ST, we compute the loading
-    # plans for all shards and see if they are doable.
-    validate_non_overlapping_shards_metadata(
-        [s.shard_metadata for s in checkpoint_md.shards]
-    )
-
-    for shard_md in tensor_md.shards_metadata:
-        read_volume = 0
-        for storage_md in checkpoint_md.shards:
-            shard_md_from_storage = storage_md.shard_metadata
-
-            if not _check_shard_metadata_pair_overlap(shard_md, shard_md_from_storage):
-                continue
-
-            shard_volume = 1
-            for (_, _, _, length,) in _shards_get_overlap_region_wrt_saved_tensor(
-                saved_shard=shard_md_from_storage, current_shard=shard_md
-            ):
-                shard_volume *= length
-            read_volume += shard_volume
-
-        shard_volume = 1
-        for size in shard_md.shard_sizes:
-            shard_volume *= size
-        if read_volume != shard_volume:
-            raise ValueError(
-                f"Shard {shard_md} only has {read_volume} available" +
-                f" elements but needs {shard_volume}"
-            )
