@@ -14,18 +14,21 @@ from .metadata import (
     TensorInfo,
 )
 
-
 class WriteItemType(Enum):
     TENSOR = auto()
     SHARD = auto()
     BYTE_IO = auto()
 
-@dataclass
+class LoadItemType(Enum):
+    TENSOR = auto()
+    BYTE_IO = auto()
+
+@dataclass(frozen=True)
 class TensorWriteData:
     chunk: ChunkStorageMetadata
     info: TensorInfo
 
-@dataclass
+@dataclass(frozen=True)
 class WriteItem:
     index: MetadataIndex
     type: WriteItemType
@@ -33,37 +36,20 @@ class WriteItem:
     # Value present if it's a tensor write
     tensor_data: Optional[TensorWriteData] = None
 
-    @property
-    def is_tensor(self):
-        return self.type == WriteItemType.TENSOR
-
-    @property
-    def is_bytesio(self):
-        return self.type == WriteItemType.BYTE_IO
-
-    @property
-    def is_shard(self):
-        return self.type == WriteItemType.SHARD
-
-@dataclass
+@dataclass(frozen=True)
 class WriteResult:
     index: MetadataIndex
 
     size_in_bytes: int
     storage_data: Any
 
-@dataclass
+@dataclass(frozen=True)
 class SavePlan:
     items: List[WriteItem]
     storage_data: Any = None
     planner_data: Any = None
 
-
-class LoadItemType(Enum):
-    TENSOR = auto()
-    BYTE_IO = auto()
-
-@dataclass
+@dataclass(frozen=True)
 class ReadItem:
     index: MetadataIndex
     type: LoadItemType
@@ -73,36 +59,6 @@ class ReadItem:
     # Offset from stored tensor
     dest_offsets: torch.Size
     lengths: torch.Size
-
-    @classmethod
-    def create_for_byteio(cls, index, src_offset, dest_offset, length):
-        return ReadItem(
-            index=index,
-            type=LoadItemType.BYTE_IO,
-            storage_offsets=torch.Size((src_offset,)),
-            dest_offsets=torch.Size((dest_offset,)),
-            lengths=torch.Size((length,)),
-        )
-
-    @classmethod
-    def create_for_tensor(cls, index, storage_offsets, dest_offsets, lengths):
-        return ReadItem(
-            index=index,
-            type=LoadItemType.TENSOR,
-            storage_offsets=torch.Size(storage_offsets),
-            dest_offsets=torch.Size(dest_offsets),
-            lengths=torch.Size(lengths),
-        )
-
-
-    @property
-    def is_tensor(self):
-        return self.type == LoadItemType.TENSOR
-
-    @property
-    def is_bytesio(self):
-        return self.type == LoadItemType.BYTE_IO
-
 
 STATE_DICT_TYPE = Dict[str, Any]
 

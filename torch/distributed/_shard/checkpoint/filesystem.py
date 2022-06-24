@@ -14,12 +14,14 @@ from .metadata import (
     MetadataIndex,
 )
 from .storage import (
+    LoadItemType,
     LoadPlanner,
     LoadPlan,
     SavePlan,
     SavePlanner,
     StorageReader,
     StorageWriter,
+    WriteItemType,
     WriteResult,
     ReadItem,
     WriteItem
@@ -101,7 +103,7 @@ class FileSystemWriter(StorageWriter):
 
         def _write_item(stream, write_item):
             data = planner.resolve_data(write_item)
-            if write_item.is_bytesio:
+            if write_item.type == WriteItemType.BYTE_IO:
                 assert isinstance(data, io.BytesIO)
                 stream.write(data.getbuffer())
             else:
@@ -207,7 +209,7 @@ class FileSystemReader(StorageReader):
                     item_md = self.storage_data[req.index]
                     file_slice = self._slice_file(file, item_md)
 
-                    if req.is_bytesio:
+                    if req.type == LoadItemType.BYTE_IO:
                         planner.write_bytes(req, file_slice)
                     else:
                         tensor = cast(Tensor, torch.load(file_slice, map_location="cpu"))

@@ -57,3 +57,4 @@ class Metadata:
     state_dict_metadata: Dict[str, STORAGE_TYPES]
     storage_data: Any = None
     planner_data: Any = None
+
