@@ -27,14 +27,16 @@ from .metadata import (
 )
 
 from .storage import (
-    SavePlan,
     WriteItem,
     WriteItemType,
-    SavePlanner,
     WriteResult,
     TensorWriteData,
-    LoadPlan,
+    LoadItemType,
+    WriteItemType,
     ReadItem,
+    SavePlan,
+    SavePlanner,
+    LoadPlan,
     LoadPlanner,
     STATE_DICT_TYPE,
 )
@@ -171,6 +173,27 @@ def create_write_items(fqn: str, object: Any) -> List[WriteItem]:
     else:
         return [_create_for_bytesio(fqn, object)]
 
+
+def create_read_item_for_byteio(index, src_offset, dest_offset, length):
+    return ReadItem(
+        index=index,
+        type=LoadItemType.BYTE_IO,
+        storage_offsets=torch.Size((src_offset,)),
+        dest_offsets=torch.Size((dest_offset,)),
+        lengths=torch.Size((length,)),
+    )
+
+def create_read_item_for_tensor(index, storage_offsets, dest_offsets, lengths):
+    return ReadItem(
+        index=index,
+        type=LoadItemType.TENSOR,
+        storage_offsets=torch.Size(storage_offsets),
+        dest_offsets=torch.Size(dest_offsets),
+        lengths=torch.Size(lengths),
+    )
+
+
+
 def create_default_local_plan(state_dict: Dict[str, Any], is_coordinator: bool):
     requests = []
     for fqn, obj in state_dict.items():
@@ -186,10 +209,10 @@ def create_default_global_plan(all_plans: List[SavePlan]) -> Tuple[List[SavePlan
 
     for plan in all_plans:
         for item in plan.items:
-            if not item.is_shard:
+            if not item.type == WriteItemType.SHARD:
                 assert item.index.fqn not in md
 
-            if item.is_bytesio:
+            if item.type == WriteItemType.BYTE_IO:
                 md[item.index.fqn] = BytesStorageMetadata(size_in_bytes=-1)
             else:
                 assert item.tensor_data is not None
@@ -306,7 +329,7 @@ def _create_sharded_read_items(
 
             read_items.append(
                 # FIXME pass the local shard index
-                ReadItem.create_for_tensor(
+                create_read_item_for_tensor(
                     index=MetadataIndex(fqn, torch.Size(shard.metadata.shard_offsets), idx),
                     storage_offsets=storage_offsets,
                     dest_offsets=dest_offsets,
@@ -315,10 +338,9 @@ def _create_sharded_read_items(
             )
     return read_items
 
-
 def create_read_items(fqn: str, md: STORAGE_TYPES, obj: Any) -> List[ReadItem]:
     if isinstance(md, BytesStorageMetadata):
-        return [ReadItem.create_for_byteio(
+        return [create_read_item_for_byteio(
             index=MetadataIndex(fqn),
             src_offset=0,
             dest_offset=0,
@@ -394,7 +416,7 @@ class DefaultSavePlanner(SavePlanner):
         """
         This is an extension from the planner interface to make it easy to extend the default planner
         """
-        if write_item.is_bytesio:
+        if write_item.type == WriteItemType.BYTE_IO:
             bytes = io.BytesIO()
             torch.save(object, bytes)
             object = bytes
