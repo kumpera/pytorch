@@ -81,15 +81,13 @@ def save_state_dict(
         is the user's responsibility to ensure that this is set so that each rank
         has an individual GPU, via ``torch.cuda.set_device()``
     """
-    is_coordinator = no_dist or dist.get_rank(process_group) == coordinator_rank
     distW = DistWrapper(process_group, not no_dist, coordinator_rank)
-
     if planner is None:
         planner = DefaultSavePlanner()
 
     def local_step():
-        planner.init(state_dict, is_coordinator)
-        storage_writer.init(is_coordinator)
+        planner.init(state_dict, distW.is_coordinator)
+        storage_writer.init(distW.is_coordinator)
         local_plan = planner.create_local_plan()
         local_plan = storage_writer.prepare_local_plan(local_plan)
         return local_plan
