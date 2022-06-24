@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+import dataclasses
 import io
 import pickle
 from typing import List, Union, Dict, cast
@@ -80,11 +81,10 @@ class FileSystemWriter(StorageWriter):
         return plan
 
     def prepare_global_plan(self, global_plan: List[SavePlan]) -> List[SavePlan]:
-        # Add a prefix for each rank
-        # FIXME maybe make this the default behavior?
-        for i, plan in enumerate(global_plan):
-            plan.storage_data = _StoragePrefix(f"__{i}_")
-        return global_plan
+        new_plans = [
+            dataclasses.replace(plan, storage_data=_StoragePrefix(f"__{i}_")) for i, plan in enumerate(global_plan)
+        ]
+        return new_plans
 
     def write_data(
         self,
