@@ -10,7 +10,15 @@ def tensor_narrow_n(tensor: torch.Tensor, offsets: Tuple[int, ...], lengths: Tup
         tensor = torch.narrow(tensor, dim, start, length)
     return tensor
 
-class DistWrapper:
+class _DistWrapper:
+    """
+    This is a wrapper around PG that provides a series of features around object collectives.
+
+    It works without distributed initialized, where most collectives turns into nops.
+
+    All variants that take functions are exception robust, meaning that if one or more
+    ranks raise errors, all ranks will observe those.
+    """
     def __init__(self, group: dist.ProcessGroup, use_dist: bool, coordinator_rank: int):
         self.group = group
         self.use_dist = use_dist
@@ -30,7 +38,7 @@ class DistWrapper:
             return dist.get_world_size(self.group)
         return 1
 
-    def broadcast(self, object: Any) -> Any:
+    def broadcast_object(self, object: Any) -> Any:
         object_list = [object]
         if self.use_dist:
             dist.broadcast_object_list(
@@ -39,7 +47,7 @@ class DistWrapper:
                 src=self.coordinator_rank)
         return object_list[0]
 
-    def gather(self, object: Any) -> Union[List[Any], None]:
+    def gather_object(self, object: Any) -> Union[List[Any], None]:
         if self.use_dist:
             gather_objs = [None] * dist.get_world_size(self.group) if self.is_coordinator else None
 
@@ -49,13 +57,12 @@ class DistWrapper:
                 dst=self.coordinator_rank,
                 group=self.group
             )
-            # flatten
             result = gather_objs
         else:
             result = [object]
         return result
 
-    def allgather(self, object: Any) -> List[Any]:
+    def all_gather_object(self, object: Any) -> List[Any]:
         if self.use_dist:
             gather_objs = [None] * dist.get_world_size(self.group)
 
@@ -68,7 +75,7 @@ class DistWrapper:
             gather_objs = [object]
         return gather_objs
 
-    def scatter(self, object_list: List[Any]) -> Any:
+    def scatter_object(self, object_list: List[Any]) -> Any:
         if self.use_dist:
             gather_result = [None]
             dist.scatter_object_list(
@@ -83,39 +90,25 @@ class DistWrapper:
             local_reply = object_list[0]
         return local_reply
 
-    def run_on_coordinator(self, step, coordinator_cb: Callable[[], Any]) -> Any:
-        result: Any = None
-        if self.is_coordinator:
-            try:
-                result = coordinator_cb()
-            except BaseException as e:
-                traceback.print_exc()
-                result = e
-
-        # Writing can only start once prepare has finished
-        exception = self.broadcast(result)
-        if isinstance(exception, BaseException):
-            raise CheckpointException(step, {self.coordinator_rank : exception})
-
-    def map_scatter(self,
+    def reduce_scatter(self,
         step: str,
-        map_cb: Callable[[], Any],
-        coordinator_cb: Callable[[List[Any]], List[Any]]
+        map_fun: Callable[[], Any],
+        reduce_fun: Callable[[List[Any]], List[Any]]
     ) -> Any:
         try:
-            local_data = map_cb()
+            local_data = map_fun()
         except BaseException as e:
             traceback.print_exc()
             local_data = e
 
-        all_data = self.gather(local_data)
+        all_data = self.gather_object(local_data)
         all_results = None
         if self.is_coordinator:
             node_failures = {i: err for i, err in enumerate(all_data) if isinstance(err, BaseException)}
 
             if len(node_failures) == 0:
                 try:
-                    all_results = coordinator_cb(all_data)
+                    all_results = reduce_fun(all_data)
                 except BaseException as e:
                     traceback.print_exc()
                     node_failures[self.rank] = e
@@ -123,12 +116,12 @@ class DistWrapper:
             if len(node_failures) > 0:
                 all_results = [CheckpointException(step, node_failures)] * self.get_world_size()
 
-        result = self.scatter(all_results)
+        result = self.scatter_object(all_results)
         if isinstance(result, BaseException):
             raise result
         return result
 
-    def map_reduce(self,
+    def all_reduce(self,
         step: str,
         map_cb: Callable[[], Any],
         reduce_cb: Callable[[List[Any]], Any]
@@ -139,7 +132,7 @@ class DistWrapper:
             traceback.print_exc()
             local_data = e
 
-        all_data = self.gather(local_data)
+        all_data = self.gather_object(local_data)
         result = None
         if self.is_coordinator:
             node_failures = {i: err for i, err in enumerate(all_data) if isinstance(err, BaseException)}
@@ -154,24 +147,24 @@ class DistWrapper:
             if len(node_failures) > 0:
                 result = CheckpointException(step, node_failures)
 
-        result = self.broadcast(result)
+        result = self.broadcast_object(result)
         if isinstance(result, BaseException):
             raise result
         return result
 
-    def run_on_all_ranks(self,
+    def all_gather(self,
         step: str,
-        callback: Callable[[], Any],
+        map_fun: Callable[[], Any],
     ) -> Tuple[Any, Any]:
         try:
-            _ = callback()
-            result = None
+            result = map_fun()
         except BaseException as e:
             traceback.print_exc()
             result = e
 
-        all_results = self.allgather(result)
+        all_results = self.all_gather_object(result)
 
         node_failures = {i: err for i, err in enumerate(all_results) if isinstance(err, BaseException)}
         if len(node_failures) > 0:
             raise CheckpointException(step, node_failures)
+        return all_results
