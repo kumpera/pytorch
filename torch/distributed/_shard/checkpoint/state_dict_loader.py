@@ -32,7 +32,7 @@ from .storage import (
     LoadPlan,
     ReadItem
 )
-from .utils import DistWrapper
+from .utils import _DistWrapper
 
 def load_state_dict(
     state_dict: Dict[str, Any],
@@ -98,7 +98,7 @@ def load_state_dict(
         is the user's responsibility to ensure that this is set so that each rank
         has an individual GPU, via ``torch.cuda.set_device()``
     """
-    distW = DistWrapper(process_group, not no_dist, coordinator_rank)
+    distW = _DistWrapper(process_group, not no_dist, coordinator_rank)
     if planner is None:
         planner = DefaultLoadPlanner()
 
@@ -116,7 +116,7 @@ def load_state_dict(
         all_local_plans = storage_reader.prepare_global_plan(all_local_plans)
         return all_local_plans
 
-    central_plan = distW.map_scatter("plan", local_step, global_step)
+    central_plan = distW.reduce_scatter("plan", local_step, global_step)
 
     def read_data():
         final_local_plan = planner.finish_plan(central_plan)
@@ -125,4 +125,4 @@ def load_state_dict(
         all_reads.wait()
         return None
 
-    distW.run_on_all_ranks("read", read_data)
+    _ = distW.all_gather("read", read_data)

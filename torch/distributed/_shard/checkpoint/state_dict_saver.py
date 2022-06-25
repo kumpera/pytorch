@@ -17,7 +17,7 @@ from .storage import (
 )
 
 from .metadata import Metadata
-from .utils import DistWrapper
+from .utils import _DistWrapper
 
 def _create_metadata_from_local_state_dict(state_dict: Dict[str, Any]) -> Metadata:
     plan = create_default_metadata_only_plan(state_dict)
@@ -81,7 +81,7 @@ def save_state_dict(
         is the user's responsibility to ensure that this is set so that each rank
         has an individual GPU, via ``torch.cuda.set_device()``
     """
-    distW = DistWrapper(process_group, not no_dist, coordinator_rank)
+    distW = _DistWrapper(process_group, not no_dist, coordinator_rank)
     if planner is None:
         planner = DefaultSavePlanner()
 
@@ -97,7 +97,7 @@ def save_state_dict(
         all_local_plans = storage_writer.prepare_global_plan(all_local_plans)
         return all_local_plans
 
-    central_plan = distW.map_scatter("plan", local_step, global_step)
+    central_plan = distW.reduce_scatter("plan", local_step, global_step)
 
     def write_data():
         final_local_plan = planner.finish_plan(central_plan)
@@ -111,5 +111,5 @@ def save_state_dict(
         storage_writer.finish(metadata=metadata, results=all_results)
         return metadata
 
-    return distW.map_reduce("write", write_data, finish_checkpoint)
+    return distW.all_reduce("write", write_data, finish_checkpoint)
 
