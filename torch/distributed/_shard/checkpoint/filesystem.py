@@ -106,7 +106,8 @@ class FileSystemWriter(StorageWriter):
             file_count += 1
             return file_name
 
-        def _write_item(stream, write_item):
+        def _write_item(stream, write_item, storage_key, write_results):
+            offset = stream.tell()
             data = planner.resolve_data(write_item)
             if write_item.type == WriteItemType.BYTE_IO:
                 assert isinstance(data, io.BytesIO)
@@ -114,35 +115,28 @@ class FileSystemWriter(StorageWriter):
             else:
                 assert isinstance(data, torch.Tensor)
                 torch.save(data, stream)
+            length = stream.tell() - offset
+
+            write_results.append(result_from_write_item(
+                write_item,
+                length,
+                _StorageInfo(storage_key, offset, length)
+            ))
 
         # This is ugly, cleanup
         if self.single_file_per_rank:
             file_name = gen_file(storage_plan)
             with (self.path / file_name).open("wb") as w:
                 for write_item in plan.items:
-                    offset = w.tell()
-                    _write_item(w, write_item)
-                    length = w.tell() - offset
-                    res.append(result_from_write_item(
-                        write_item,
-                        length,
-                        _StorageInfo(file_name, offset, length)
-                    ))
-
+                    _write_item(w, write_item, file_name, res)
                 os.fsync(w.fileno())
 
         else:
             for write_item in plan.items:
                 file_name = gen_file(storage_plan)
                 with (self.path / file_name).open("wb") as w:
-                    _write_item(w, write_item)
-                    length = w.tell()
+                    _write_item(w, write_item, file_name, res)
                     os.fsync(w.fileno())
-                    res.append(result_from_write_item(
-                        write_item,
-                        length,
-                        _StorageInfo(file_name, 0, length)
-                    ))
 
         fut: Future[List[WriteResult]] = Future()
         fut.set_result(res)
