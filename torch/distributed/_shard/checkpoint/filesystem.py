@@ -128,6 +128,13 @@ class FileSystemWriter(StorageWriter):
             file_name = gen_file(storage_plan)
             with (self.path / file_name).open("wb") as w:
                 for write_item in plan.items:
+                    if write_item.type != WriteItemType.BYTE_IO:
+                        continue
+                    _write_item(w, write_item, file_name, res)
+
+                for write_item in plan.items:
+                    if write_item.type == WriteItemType.BYTE_IO:
+                        continue
                     _write_item(w, write_item, file_name, res)
                 os.fsync(w.fileno())
 
