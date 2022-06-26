@@ -106,14 +106,15 @@ class FileSystemWriter(StorageWriter):
             file_count += 1
             return file_name
 
-        def _write_item(stream, write_item, storage_key, write_results):
+        def _write_item(stream, data, write_item, storage_key, write_results):
             offset = stream.tell()
-            data = planner.resolve_data(write_item)
+            
             if write_item.type == WriteItemType.BYTE_IO:
                 assert isinstance(data, io.BytesIO)
                 stream.write(data.getbuffer())
             else:
                 assert isinstance(data, torch.Tensor)
+                assert data.device == torch.device("cpu")
                 torch.save(data, stream)
             length = stream.tell() - offset
 
@@ -123,26 +124,33 @@ class FileSystemWriter(StorageWriter):
                 _StorageInfo(storage_key, offset, length)
             ))
 
-        # This is ugly, cleanup
+        # This is ugly, cleanup -
+        # I have an idea, we pair (file, [items]) and go to town
         if self.single_file_per_rank:
             file_name = gen_file(storage_plan)
             with (self.path / file_name).open("wb") as w:
                 for write_item in plan.items:
                     if write_item.type != WriteItemType.BYTE_IO:
                         continue
-                    _write_item(w, write_item, file_name, res)
+                    data = planner.resolve_data(write_item)
+                    _write_item(w, data, write_item, file_name, res)
 
                 for write_item in plan.items:
                     if write_item.type == WriteItemType.BYTE_IO:
                         continue
-                    _write_item(w, write_item, file_name, res)
+                    data = planner.resolve_data(write_item)
+                    data = data.cpu()
+                    _write_item(w, data, write_item, file_name, res)
                 os.fsync(w.fileno())
 
         else:
             for write_item in plan.items:
                 file_name = gen_file(storage_plan)
                 with (self.path / file_name).open("wb") as w:
-                    _write_item(w, write_item, file_name, res)
+                    data = planner.resolve_data(write_item)
+                    if isinstance(data, torch.Tensor):
+                        data = data.cpu()
+                    _write_item(w, data, write_item, file_name, res)
                     os.fsync(w.fileno())
 
         fut: Future[List[WriteResult]] = Future()
