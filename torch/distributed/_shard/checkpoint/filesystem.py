@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 import os
 import dataclasses
@@ -50,6 +51,20 @@ def result_from_write_item(item: WriteItem, size_in_bytes, storage_data) -> Writ
         index=item.index,
         size_in_bytes=size_in_bytes,
         storage_data=storage_data)
+
+class _CpuLoader:
+    def __init__(self, resolve_fun):
+        self.resolve_fun = resolve_fun
+        self.items = []
+    
+    def add(self, size, obj):
+        self.items.append((size, obj))
+
+    def values(self):
+        for size, obj in self.items:
+            tensor = self.resolve_fun(obj)
+            tensor = tensor.cpu()
+            yield (tensor, obj,)
 
 
 class FileSystemWriter(StorageWriter):
@@ -129,18 +144,21 @@ class FileSystemWriter(StorageWriter):
         if self.single_file_per_rank:
             file_name = gen_file(storage_plan)
             with (self.path / file_name).open("wb") as w:
-                for write_item in plan.items:
-                    if write_item.type != WriteItemType.BYTE_IO:
-                        continue
+                bytes_w = [wi for wi in plan.items if wi.type == WriteItemType.BYTE_IO]
+                tensor_w = [wi for wi in plan.items if wi.type != WriteItemType.BYTE_IO]
+
+                for write_item in bytes_w:
                     data = planner.resolve_data(write_item)
                     _write_item(w, data, write_item, file_name, res)
 
-                for write_item in plan.items:
-                    if write_item.type == WriteItemType.BYTE_IO:
-                        continue
-                    data = planner.resolve_data(write_item)
-                    data = data.cpu()
-                    _write_item(w, data, write_item, file_name, res)
+                loader = _CpuLoader(lambda x: planner.resolve_data(x))
+                for write_item in tensor_w:
+                    tensor_size = math.prod(write_item.tensor_data.info.size)
+                    loader.add(tensor_size, write_item)
+
+                for tensor, write_item in loader.values():
+                    _write_item(w, tensor, write_item, file_name, res)
+
                 os.fsync(w.fileno())
 
         else:
