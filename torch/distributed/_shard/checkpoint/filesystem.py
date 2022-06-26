@@ -1,4 +1,6 @@
+import collections
 import math
+from operator import itemgetter
 from dataclasses import dataclass
 import os
 import dataclasses
@@ -8,6 +10,8 @@ from typing import List, Union, Dict, cast
 
 import torch
 from torch import Tensor
+from torch.backends import cuda
+from torch.cuda import current_stream
 from torch.futures import Future
 from pathlib import Path
 
@@ -52,7 +56,12 @@ def result_from_write_item(item: WriteItem, size_in_bytes, storage_data) -> Writ
         size_in_bytes=size_in_bytes,
         storage_data=storage_data)
 
-class _CpuLoader:
+
+def _tensor_size(tensor):
+    return tensor.numel() * tensor.element_size()
+
+
+class _SerialCpuLoader:
     def __init__(self, resolve_fun):
         self.resolve_fun = resolve_fun
         self.items = []
@@ -66,7 +75,117 @@ class _CpuLoader:
             tensor = tensor.cpu()
             yield (tensor, obj,)
 
+class _OverlappingCpuLoader:
+    def __init__(self, resolve_fun, stream = None, inflight_threshhold = 1_000_000):
+        self.resolve_fun = resolve_fun
+        self.items = []
+        self.inflight_threshhold = inflight_threshhold
+        self.in_flight_data = 0
+        self.current_items = collections.deque()
+        self.idx = 0
+        self.stream = stream or torch.cuda.current_stream()
 
+    def add(self, size, obj):
+        self.items.append((size, obj))
+
+    @property
+    def _done(self):
+        return self.idx >= len(self.items)
+
+    def _drain(self):
+        drained = []
+        if self.in_flight_data >= self.inflight_threshhold:
+            self.stream.synchronize()
+        while self.in_flight_data >= self.inflight_threshhold:
+            val = self.current_items.popleft()
+            self.in_flight_data -= val[0].numel() * val[0].element_size()
+            drained.append(val)
+        return drained
+
+    def _refill(self):
+        with torch.cuda.stream(self.stream):
+            while not self._done and self.in_flight_data < self.inflight_threshhold:
+                _, obj = self.items[self.idx]
+                self.idx += 1
+                tensor = self.resolve_fun(obj).detach()
+                if tensor.is_cuda:
+                    tensor = tensor.to(device="cpu", non_blocking=True)
+                elif tensor.device == torch.device("cpu"):
+                    if tensor.storage().size() != tensor.numel():
+                        # this forces the tensor to be both contiguous and with minimal storage
+                        tensor = tensor.clone()
+
+                self.current_items.append((tensor, obj,))
+                self.in_flight_data += tensor.numel() * tensor.element_size()
+
+    def _finish(self):
+        assert self._done
+        self.stream.synchronize()
+        return self.current_items
+
+    def values(self):
+        self.items.sort(key=lambda x: x[0])
+        while not self._done:
+            drained = self._drain()
+            self._refill()
+            for obj in drained:
+                yield obj
+
+        for val in self._finish():
+            yield val
+
+class _ParallelOverlappingCpuLoader:
+    def __init__(self, resolve_fun, inflight_threshhold = 1_000_000, stream_count = 4):
+        self.resolve_fun = resolve_fun
+        self.inflight_threshhold = inflight_threshhold
+        self.stream_count = stream_count
+        self.items = []
+        self.loaders = []
+    
+    def add(self, size, obj):
+        self.items.append((size, obj))
+
+    @property
+    def _done(self):
+        return all(l._done for l in self.loaders)
+
+    def values(self):
+        # must sync before we splinter into multiple streams
+        # FIXME add a dependency across steams instead
+        torch.cuda.synchronize()
+
+        buckets = [[] for _ in range(self.stream_count)]
+        bucket_sizes = [0 for _ in range(self.stream_count)]
+        streams = []
+        for size, obj in self.items:
+            min_idx = min(enumerate(bucket_sizes), key=itemgetter(1))[0]
+            buckets[min_idx].append((size,obj,))
+            bucket_sizes[min_idx] += size
+
+        for i, bucket in enumerate(buckets):
+            stream = torch.cuda.current_stream() if i == 0 else torch.cuda.Stream()
+            streams.append(stream)
+            l = _OverlappingCpuLoader(
+                self.resolve_fun,
+                stream=stream,
+                inflight_threshhold=self.inflight_threshhold)
+            l.items.extend(bucket)
+            self.loaders.append(l)
+
+        while not self._done:
+            drained = []
+            for l in self.loaders:
+                drained.extend(l._drain())
+            for l in self.loaders:
+                l._refill()
+
+            for obj in drained:
+                yield obj
+
+        for l in self.loaders:
+            for val in l._finish():
+                yield val
+            
 class FileSystemWriter(StorageWriter):
     """
     Basic implementation of StorageWriter using file IO.
@@ -80,7 +199,12 @@ class FileSystemWriter(StorageWriter):
     a `.metadata` file with the serialized metadata.
 
     """
-    def __init__(self, path: Union[str, os.PathLike], single_file_per_rank: bool = False) -> None:
+    def __init__(
+        self, 
+        path: Union[str, os.PathLike],
+        single_file_per_rank: bool = False,
+        sync_files = True
+    ) -> None:
         """
         Initialize the writer pointing to `path`
 
@@ -90,6 +214,7 @@ class FileSystemWriter(StorageWriter):
         super().__init__()
         self.path = Path(path)
         self.single_file_per_rank = single_file_per_rank
+        self.sync_files = sync_files
 
     def init(self, is_coordinator: bool) -> None:
         pass
@@ -151,15 +276,23 @@ class FileSystemWriter(StorageWriter):
                     data = planner.resolve_data(write_item)
                     _write_item(w, data, write_item, file_name, res)
 
-                loader = _CpuLoader(lambda x: planner.resolve_data(x))
+                # loader = _ParallelOverlappingCpuLoader(
+                #     lambda x: planner.resolve_data(x),
+                #     inflight_threshhold=10_000_000,
+                #     stream_count=6)
+                loader = _OverlappingCpuLoader(
+                    lambda x: planner.resolve_data(x),
+                    inflight_threshhold=10_000_000
+                )
                 for write_item in tensor_w:
+                    #fixme multiply by element size for better LB
                     tensor_size = math.prod(write_item.tensor_data.info.size)
                     loader.add(tensor_size, write_item)
 
                 for tensor, write_item in loader.values():
                     _write_item(w, tensor, write_item, file_name, res)
-
-                os.fsync(w.fileno())
+                if self.sync_files:
+                    os.fsync(w.fileno())
 
         else:
             for write_item in plan.items:
@@ -169,7 +302,8 @@ class FileSystemWriter(StorageWriter):
                     if isinstance(data, torch.Tensor):
                         data = data.cpu()
                     _write_item(w, data, write_item, file_name, res)
-                    os.fsync(w.fileno())
+                    if self.sync_files:
+                        os.fsync(w.fileno())
 
         fut: Future[List[WriteResult]] = Future()
         fut.set_result(res)
