@@ -51,12 +51,16 @@ class SavePlan:
 
 @dataclass(frozen=True)
 class ReadItem:
+    # this is an index into the checkpoint metadata
     index: MetadataIndex
     type: LoadItemType
 
     # Offset from tensor found in checkpoint metadata
     storage_offsets: torch.Size
-    # Offset from stored tensor
+
+    # index to lookup the destination tensor
+    dest_index: MetadataIndex
+    # Offset into the destination tensor
     dest_offsets: torch.Size
     lengths: torch.Size
 
@@ -199,7 +203,7 @@ class StorageWriter(abc.ABC):
         """
         Perform storage-specific local planning.
 
-        While this method can produce a completely different plan, the recomended 
+        While this method can produce a completely different plan, the recomended
         way is to store storage specific data in SavePlan::storage_data.
 
         Args:
@@ -242,7 +246,7 @@ class StorageWriter(abc.ABC):
 
         Subclasses should lazily call `resolve_data` as it can allocate memory.
         In case of tensors, make following assuptions:
-        
+
         - They might be on any device, including not matching the one on ``WriteItem::tensor_data``
         - They might be views or not contiguous. Only the projection needs to be saved.
 
@@ -279,7 +283,7 @@ class StorageReader(abc.ABC):
 
     One StorageReader instance acts as both the coordinator and the follower
     in a distributed checkpoint. As part of initialization, each instance
-    is told its role. 
+    is told its role.
 
     A subclass should expected the following sequence of calls by ``load_state_dict``:
 
@@ -317,7 +321,7 @@ class StorageReader(abc.ABC):
         """
         Perform storage-specific local planning.
 
-        While this method can produce a completely different plan, the recomended 
+        While this method can produce a completely different plan, the recomended
         way is to store storage specific data in LoadPlan::storage_data.
 
         Args:
@@ -359,7 +363,7 @@ class StorageReader(abc.ABC):
 
         It's the StorageLayer responsibility to properly schedule any cross device copies
         required.
-        
+
         Args:
             plan (LoadPlan): The local plan to execute on
             planner (LoadPlanner): The planner object to use to resolve items.

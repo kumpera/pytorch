@@ -33,7 +33,6 @@ from .storage import (
     WriteResult,
     TensorWriteData,
     LoadItemType,
-    WriteItemType,
     ReadItem,
     SavePlan,
     SavePlanner,
@@ -175,20 +174,22 @@ def create_write_items(fqn: str, object: Any) -> List[WriteItem]:
         return [_create_for_bytesio(fqn, object)]
 
 
-def create_read_item_for_byteio(index, src_offset, dest_offset, length):
+def create_read_item_for_byteio(index, src_offset, dest_index, dest_offset, length):
     return ReadItem(
         index=index,
         type=LoadItemType.BYTE_IO,
         storage_offsets=torch.Size((src_offset,)),
+        dest_index=dest_index,
         dest_offsets=torch.Size((dest_offset,)),
         lengths=torch.Size((length,)),
     )
 
-def create_read_item_for_tensor(index, storage_offsets, dest_offsets, lengths):
+def create_read_item_for_tensor(index, storage_offsets, dest_index, dest_offsets, lengths):
     return ReadItem(
         index=index,
         type=LoadItemType.TENSOR,
         storage_offsets=torch.Size(storage_offsets),
+        dest_index=dest_index,
         dest_offsets=torch.Size(dest_offsets),
         lengths=torch.Size(lengths),
     )
@@ -304,7 +305,7 @@ def _create_sharded_read_items(
     read_items = []
     # this is a naive quadratic algo that can be optimized later
     for idx, shard in enumerate(local_shards):
-        for storage_md in checkpoint_md.chunks:
+        for storage_idx, storage_md in enumerate(checkpoint_md.chunks):
             shard_md_from_storage = ShardMetadata(
                 shard_sizes=list(storage_md.sizes),
                 shard_offsets=list(storage_md.offsets),
@@ -333,8 +334,9 @@ def _create_sharded_read_items(
             read_items.append(
                 # FIXME pass the local shard index
                 create_read_item_for_tensor(
-                    index=MetadataIndex(fqn, torch.Size(shard.metadata.shard_offsets), idx),
+                    index=MetadataIndex(fqn, storage_md.offsets, storage_idx),
                     storage_offsets=storage_offsets,
+                    dest_index=MetadataIndex(fqn, torch.Size(shard.metadata.shard_offsets), idx),
                     dest_offsets=dest_offsets,
                     lengths=lengths,
                 )
@@ -346,6 +348,7 @@ def create_read_items(fqn: str, md: STORAGE_TYPES, obj: Any) -> List[ReadItem]:
         return [create_read_item_for_byteio(
             index=MetadataIndex(fqn),
             src_offset=0,
+            dest_index=MetadataIndex(fqn),
             dest_offset=0,
             length=md.size_in_bytes
         )]
@@ -445,7 +448,7 @@ class DefaultLoadPlanner(LoadPlanner):
         self.state_dict[read_item.index.fqn] = torch.load(value)
 
     def resolve_tensor(self, read_item: ReadItem):
-        tensor = self.lookup_tensor(read_item.index)
+        tensor = self.lookup_tensor(read_item.dest_index)
         return self.transform_tensor(read_item, tensor)
 
     def lookup_tensor(self, index: MetadataIndex) -> torch.Tensor:

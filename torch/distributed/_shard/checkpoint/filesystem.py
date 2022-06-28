@@ -87,21 +87,14 @@ class FileSystemWriter(StorageWriter):
     The checkpoint consist of one file per write request plus
     a `.metadata` file with the serialized metadata.
 
+    N. B. All files are opened in exclusive mode, ranks do not override existing files and fail instead.
     """
-    def __init__(
-        self,
-        path: Union[str, os.PathLike],
-    ) -> None:
+    def __init__(self, path: Union[str, os.PathLike]) -> None:
         """
         Initialize the writer pointing to `path`
 
         Args:
             path: diretory where the checkpoint will be writen to.
-
-        N. B. If sync_files is disabled, there's no guarantee that the checkpoint will be consistent in the case of a failure.
-        N. B. The coordinator rank will try to create the directly and will fail if it already exists.
-
-        All files are opened in exclusive mode, ranks do not override existing files and fail instead.
         """
         super().__init__()
         self.path = Path(path)
@@ -114,7 +107,7 @@ class FileSystemWriter(StorageWriter):
         return plan
 
     def prepare_global_plan(self, global_plan: List[SavePlan]) -> List[SavePlan]:
-        self.path.mkdir(parents=True, exist_ok=False)
+        self.path.mkdir(parents=True, exist_ok=True)
 
         new_plans = [
             dataclasses.replace(plan, storage_data=_StoragePrefix(f"__{i}_")) for i, plan in enumerate(global_plan)
@@ -138,7 +131,7 @@ class FileSystemWriter(StorageWriter):
         write_results = []
         for write_item in plan.items:
             file_name = gen_file()
-            with open(file_name, "wbx") as stream:
+            with open(self.path / file_name, "xb") as stream:
                 data = planner.resolve_data(write_item)
                 if write_item.type != WriteItemType.BYTE_IO:
                     tensor = cast(torch.Tensor, planner.resolve_data(write_item))
@@ -157,7 +150,7 @@ class FileSystemWriter(StorageWriter):
                 wr.index: wr.storage_data for wr in wr_list
             })
         metadata.storage_data = storage_md
-        with (self.path / ".metadata.tmp").open("wbx") as metadata_file:
+        with (self.path / ".metadata.tmp").open("xb") as metadata_file:
             pickle.dump(metadata, metadata_file)
             os.fsync(metadata_file.fileno())
 
@@ -180,7 +173,6 @@ class FileSystemReader(StorageReader):
             item_md = self.storage_data[read_item.index]
             path = item_md.relative_path
             per_file.setdefault(path, []).append(read_item)
-
 
         for relative_path, reqs in per_file.items():
             with (self.path / relative_path).open("rb") as file:

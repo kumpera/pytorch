@@ -1,7 +1,7 @@
 # Owner(s): ["oncall: distributed"]
 
 import sys
-from typing import Optional, List, Union, Dict, Tuple, Any, cast
+from typing import Optional, List
 from torch.distributed._shard.checkpoint.storage import WriteResult
 
 from torch.distributed._shard.checkpoint import (
@@ -17,7 +17,6 @@ import torch.distributed as dist
 import torch.nn
 import torch.futures
 from torch.futures import Future
-from torch.testing._internal.common_utils import TestCase
 
 from torch.distributed._shard import sharded_tensor
 
@@ -105,7 +104,7 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
         st = sharded_tensor.zeros(spec, 4, 4, dtype=torch.float64)
         mapping = dict()
 
-        md = _create_metadata_from_local_state_dict({ "st": st })
+        md = _create_metadata_from_local_state_dict({"st": st})
 
         st_md = md.state_dict_metadata["st"]
         self.assertEqual(1, len(st_md.chunks))
@@ -124,25 +123,23 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
 
         st = sharded_tensor.zeros(spec, 4, 4, dtype=torch.float64)
         tensor = torch.rand(10, 10)
-        
-        mapping = dict()
 
-        md = _create_metadata_from_local_state_dict({ 
+        md = _create_metadata_from_local_state_dict({
             "st": st,
             "tensor": tensor,
-            "other": [1,2,3]
+            "other": [1, 2, 3]
         })
 
         st_md = md.state_dict_metadata["st"]
         self.assertTrue(isinstance(st_md, TensorStorageMetadata))
-        self.assertEqual(st_md.properties.size, st.size()) 
-        self.assertEqual(st_md.properties.properties.dtype, torch.float64) 
+        self.assertEqual(st_md.properties.size, st.size())
+        self.assertEqual(st_md.properties.properties.dtype, torch.float64)
         self.assertEqual(2, len(st_md.chunks))
 
         tensor_md = md.state_dict_metadata["tensor"]
         self.assertTrue(isinstance(tensor_md, TensorStorageMetadata))
         self.assertEqual(tensor_md.properties.size, tensor.size())
-        self.assertEqual(tensor_md.properties.properties.dtype, tensor.dtype) 
+        self.assertEqual(tensor_md.properties.properties.dtype, tensor.dtype)
         self.assertEqual(1, len(tensor_md.chunks))
 
         bytes_md = md.state_dict_metadata["other"]
@@ -237,13 +234,13 @@ class FaultyStorageReader(TestStorageBase, StorageReader):
         self._fail_rank("fail_prepare_global_plan")
         return plans
 
-    def read_data(self,
+    def read_data(
+        self,
         plan: LoadPlan,
         planner: LoadPlanner
     ) -> Future[None]:
         self._fail_rank("fail_read_data")
         return self._fail_rank_async("fail_read_data_async")
- 
 
 class TestDistributedFailure(ShardedTensorTestBase):
     def get_spec(self):
@@ -371,7 +368,7 @@ class TestDistributedFailure(ShardedTensorTestBase):
     def test_load_error_handling(self) -> None:
         state_dict = {
             'sharded': sharded_tensor.rand(self.get_spec(), 20, 20),
-            'replicated': torch.rand(10, 10), 
+            'replicated': torch.rand(10, 10),
             'bytes': [1, 2, 3, 4]
         }
 
