@@ -1647,6 +1647,7 @@ def all_gather_object(object_list, obj, group=None):
 
     current_device = _get_pg_device(group)
     input_tensor, local_size = _object_to_tensor(obj, current_device)
+
     # Gather all local sizes. This is so that we can find the max size, and index
     # until the correct size when deserializing the tensors.
     group_size = get_world_size(group=group)
@@ -1735,7 +1736,6 @@ def gather_object(obj, object_gather_list=None, dst=0, group=None):
         _warn_not_in_group("gather_object")
         return
 
-    current_device = _get_pg_device(group)
     # Ensure object_gather_list is specified appopriately.
     my_rank = get_rank()
     _validate_output_list_for_rank(my_rank, dst, object_gather_list)
@@ -1881,13 +1881,6 @@ def broadcast_object_list(object_list, src=0, group=None, device=None):
             object_list[i] = _tensor_to_object(obj_view, obj_size)
 
 
-
-def _get_pg_device(group: ProcessGroup):
-    if _check_for_nccl_backend(group):
-        return torch.device("cuda", torch.cuda.current_device())
-    return torch.device("cpu")
-
-
 def scatter_object_list(
     scatter_object_output_list, scatter_object_input_list, src=0, group=None
 ):
@@ -1953,7 +1946,6 @@ def scatter_object_list(
             "Expected argument scatter_object_output_list to be a list of size at least 1."
         )
 
-    pg_device = _get_pg_device(group)
     my_rank = get_rank(group)
     pg_device = _get_pg_device(group)
     if my_rank == src:
