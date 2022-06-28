@@ -1,7 +1,5 @@
 # Owner(s): ["oncall: distributed"]
 
-from asyncore import write
-import random
 import sys
 from typing import Optional, List, Union, Dict, Tuple, Any, cast
 from torch.distributed._shard.checkpoint.storage import WriteResult
@@ -141,23 +139,34 @@ class TestDistributedCheckpointing(ShardedTensorTestBase):
         self.assertEqual(st_md.properties.properties.dtype, torch.float64) 
         self.assertEqual(2, len(st_md.chunks))
 
-
         tensor_md = md.state_dict_metadata["tensor"]
         self.assertTrue(isinstance(tensor_md, TensorStorageMetadata))
         self.assertEqual(tensor_md.properties.size, tensor.size())
         self.assertEqual(tensor_md.properties.properties.dtype, tensor.dtype) 
         self.assertEqual(1, len(tensor_md.chunks))
 
+        bytes_md = md.state_dict_metadata["other"]
+        self.assertTrue(isinstance(bytes_md, BytesStorageMetadata))
+
+
 class TestStorageBase:
     def __init__(
         self,
         fail_conf
     ):
-        self.fail_conf = fail_conf
+        self.fail_conf: dict = fail_conf
         self.rank = 0 if not dist.is_initialized() else dist.get_rank()
+        self.probed = set()
 
     def _get_ranks(self, name):
-        return self.fail_conf[name] if name in self.fail_conf else None
+        self.probed.add(name)
+        return self.fail_conf.get(name)
+
+    def verify_asserts(self):
+        # all fail_conf keys must be in the probeset
+        diff = set(self.fail_conf.keys()) - self.probed
+        if len(diff) > 0:
+            raise RuntimeError(f"Invalid fail_conf. Unprobed keys: {diff}")
 
     def _fail_rank(self, name):
         ranks = self._get_ranks(name)
@@ -181,6 +190,9 @@ class FaultyStorageWriter(TestStorageBase, StorageWriter):
     ):
         super(FaultyStorageWriter, self).__init__(fail_conf)
 
+    def init(self, is_coordinator: bool) -> None:
+        self._fail_rank("fail_init")
+
     def prepare_local_plan(self, plan: SavePlan) -> SavePlan:
         self._fail_rank("fail_prepare_local_plan")
         return plan
@@ -188,9 +200,6 @@ class FaultyStorageWriter(TestStorageBase, StorageWriter):
     def prepare_global_plan(self, plans: List[SavePlan]) -> List[SavePlan]:
         self._fail_rank("fail_prepare_global_plan")
         return plans
-
-    def prepare(self) -> None:
-        self._fail_rank("fail_prepare")
 
     def write_data(
         self,
@@ -200,7 +209,7 @@ class FaultyStorageWriter(TestStorageBase, StorageWriter):
         self._fail_rank("fail_write_data")
         return self._fail_rank_async("fail_write_data_async", [])
 
-    def finish(self, metadata: Metadata) -> None:
+    def finish(self, metadata: Metadata, results: List[WriteResult]) -> None:
         self._fail_rank("fail_finish")
 
 
@@ -213,7 +222,14 @@ class FaultyStorageReader(TestStorageBase, StorageReader):
         super(FaultyStorageReader, self).__init__(fail_conf)
         self.metadata = metadata
 
-    def prepare_local_plan(self, metadata: Metadata, plan: LoadPlan) -> LoadPlan:
+    def read_metadata(self) -> Metadata:
+        self._fail_rank("fail_read_metadata")
+        return self.metadata
+
+    def init(self, metadata: Metadata, is_coordinator: bool) -> None:
+        self._fail_rank("fail_init")
+
+    def prepare_local_plan(self, plan: LoadPlan) -> LoadPlan:
         self._fail_rank("fail_prepare_local_plan")
         return plan
 
@@ -227,19 +243,7 @@ class FaultyStorageReader(TestStorageBase, StorageReader):
     ) -> Future[None]:
         self._fail_rank("fail_read_data")
         return self._fail_rank_async("fail_read_data_async")
-
-    #     bad_ranks = self._get_ranks("fail_deser_bytes")
-    #     for r in requests:
-    #         if bad_ranks is not None and self.rank in bad_ranks:
-    #             # this is not "guaranteed" to fail, but hard to beat
-    #             rand = random.Random(1237)
-    #             r.bytes.write(rand.randbytes(32))
-    #         else:
-    #             torch.save([1, 2, 3], r.bytes)
-
-    def read_metadata(self) -> Metadata:
-        self._fail_rank("fail_read_metadata")
-        return self.metadata
+ 
 
 class TestDistributedFailure(ShardedTensorTestBase):
     def get_spec(self):
@@ -299,12 +303,14 @@ class TestDistributedFailure(ShardedTensorTestBase):
         no_dist = not dist.is_initialized()
 
         def _save():
+            writer = FaultyStorageWriter(kwargs)
             save_state_dict(
                 state_dict,
-                storage_writer=FaultyStorageWriter(kwargs),
+                storage_writer=writer,
                 coordinator_rank=coordinator,
                 no_dist=no_dist,
             )
+            writer.verify_asserts()
         self._test_dist_failure(_save, kwargs)
 
     def _test_load(self, state_dict, coordinator=0, **kwargs):
@@ -312,12 +318,14 @@ class TestDistributedFailure(ShardedTensorTestBase):
 
         def _load():
             metadata = _create_metadata_from_local_state_dict(state_dict)
+            reader = FaultyStorageReader(metadata, kwargs)
             load_state_dict(
                 state_dict,
-                storage_reader=FaultyStorageReader(metadata, kwargs),
+                storage_reader=reader,
                 coordinator_rank=coordinator,
                 no_dist=no_dist,
             )
+            reader.verify_asserts()
 
         self._test_dist_failure(_load, kwargs)
 
@@ -331,7 +339,7 @@ class TestDistributedFailure(ShardedTensorTestBase):
             'bytes': [1, 2, 3, 4]
         }
 
-        self._test_save(state_dict, fail_prepare=[0])
+        self._test_save(state_dict, fail_init=[2])
         self._test_save(state_dict, fail_finish=[0])
         self._test_save(state_dict, fail_prepare_global_plan=[0])
 
@@ -339,7 +347,6 @@ class TestDistributedFailure(ShardedTensorTestBase):
         self._test_save(state_dict, fail_write_data=[2])
         self._test_save(state_dict, fail_write_data_async=[3])
 
-        self._test_save(state_dict, coordinator=1, fail_prepare=[1])
         self._test_save(state_dict, coordinator=1, fail_finish=[1])
 
     def test_save_error_handling_no_dist(self) -> None:
@@ -350,10 +357,10 @@ class TestDistributedFailure(ShardedTensorTestBase):
 
         self.assertFalse(dist.is_initialized())
 
-        self._test_save(state_dict, fail_prepare=[0])
         self._test_save(state_dict, fail_finish=[0])
         self._test_save(state_dict, fail_prepare_global_plan=[0])
 
+        self._test_save(state_dict, fail_init=[0])
         self._test_save(state_dict, fail_prepare_local_plan=[0])
         self._test_save(state_dict, fail_write_data=[0])
         self._test_save(state_dict, fail_write_data_async=[0])
@@ -371,6 +378,7 @@ class TestDistributedFailure(ShardedTensorTestBase):
         self._test_load(state_dict)
         self._test_load(state_dict, fail_prepare_global_plan=[0])
         self._test_load(state_dict, fail_read_metadata=[0])
+        self._test_load(state_dict, fail_init=[0])
         self._test_load(state_dict, fail_prepare_local_plan=[1])
         self._test_load(state_dict, fail_read_data=[3])
         self._test_load(state_dict, fail_read_data_async=[1])
@@ -379,6 +387,7 @@ class TestDistributedFailure(ShardedTensorTestBase):
         self._test_load(state_dict, coordinator=2, fail_read_data=[0])
         self._test_load(state_dict, coordinator=3, fail_read_data_async=[2])
         self._test_load(state_dict, coordinator=1, fail_prepare_global_plan=[1])
+        self._test_load(state_dict, coordinator=1, fail_init=[1])
 
 
     def test_load_error_handling_no_dist(self) -> None:
@@ -392,6 +401,7 @@ class TestDistributedFailure(ShardedTensorTestBase):
         self._test_load(state_dict, fail_prepare_global_plan=[0])
         self._test_load(state_dict, fail_read_data=[0])
         self._test_load(state_dict, fail_read_data_async=[0])
+        self._test_load(state_dict, fail_init=[0])
 
 if __name__ == "__main__":
     run_tests()
