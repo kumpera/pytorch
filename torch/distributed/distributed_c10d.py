@@ -6,7 +6,7 @@ import pickle
 import time
 import warnings
 from datetime import timedelta
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Callable, Dict, Optional, Tuple, Union, cast
 
 import torch
 from torch._C._distributed_c10d import (
@@ -25,6 +25,8 @@ from torch._C._distributed_c10d import (
     Store,
     DebugLevel,
     get_debug_level,
+    LocalRank,
+    GlobalRank,
 )
 from torch._six import string_classes
 
@@ -291,7 +293,7 @@ def _warn_not_in_group(op_name):
     )
 
 
-def _get_group_rank(group: ProcessGroup, rank):
+def _get_group_rank(group: ProcessGroup, rank: GlobalRank) -> LocalRank:
     """
     Helper that gets a given group's local rank in the group from a given global
     rank.
@@ -303,7 +305,7 @@ def _get_group_rank(group: ProcessGroup, rank):
     if group not in _pg_group_ranks:
         raise RuntimeError("The given group does not exist")
     try:
-        group_rank = _pg_group_ranks[group][rank]
+        group_rank = cast(LocalRank, _pg_group_ranks[group][rank])
     except KeyError:
         raise RuntimeError(
             f"The global rank {rank} is not part of the group {group}"
@@ -311,7 +313,7 @@ def _get_group_rank(group: ProcessGroup, rank):
     return group_rank
 
 
-def _get_global_rank(group, group_rank):
+def _get_global_rank(group, group_rank: LocalRank) -> GlobalRank:
     """
     Helper that gets a given group's global rank from a given local rank in the
     group.
@@ -323,7 +325,7 @@ def _get_global_rank(group, group_rank):
     group_rank_map = _pg_group_ranks[group]
     for rank, grp_rank in group_rank_map.items():
         if grp_rank == group_rank:
-            return rank
+            return GlobalRank(rank)
     raise RuntimeError("The group rank is not part of the group")
 
 
@@ -830,7 +832,7 @@ def destroy_process_group(group=None):
         del _pg_group_ranks[pg]
 
 
-def get_rank(group=None):
+def get_rank(group=None) -> Union[LocalRank, GlobalRank]:
     """
     Returns the rank of the current process in the provided ``group`` or the
     default group if none was provided.
@@ -849,14 +851,19 @@ def get_rank(group=None):
 
     """
     if _rank_not_in_group(group):
-        return -1
+        return LocalRank(-1)
 
     default_pg = _get_default_group()
     if group is None or group is GroupMember.WORLD:
-        return default_pg.rank()
+        return cast(GlobalRank, default_pg.rank())
 
     return _get_group_rank(group, default_pg.rank())
 
+def _local_rank(group: ProcessGroup) -> LocalRank:
+    return cast(LocalRank, get_rank(group))
+
+def _global_rank() -> GlobalRank:
+    return cast(GlobalRank, get_rank())
 
 def get_world_size(group=None):
     """
@@ -910,7 +917,7 @@ def isend(tensor, dst, group=None, tag=0):
         return group.send([tensor], group_dst_rank, tag)
 
 
-def irecv(tensor, src=None, group=None, tag=0):
+def irecv(tensor, src: Optional[GlobalRank] =None, group=None, tag=0):
     """
     Receives a tensor asynchronously.
 
@@ -947,7 +954,7 @@ def irecv(tensor, src=None, group=None, tag=0):
             return pg.recv([tensor], group_src_rank, tag)
 
 
-def send(tensor, dst, group=None, tag=0):
+def send(tensor, dst: GlobalRank, group=None, tag=0):
     """
     Sends a tensor synchronously.
 
@@ -972,7 +979,7 @@ def send(tensor, dst, group=None, tag=0):
         group.send([tensor], group_dst_rank, tag).wait()
 
 
-def recv(tensor, src=None, group=None, tag=0):
+def recv(tensor, src: Optional[GlobalRank] =None, group=None, tag=0):
     """
     Receives a tensor synchronously.
 
@@ -1116,7 +1123,7 @@ def batch_isend_irecv(p2p_op_list):
     return reqs
 
 
-def broadcast_multigpu(tensor_list, src, group=None, async_op=False, src_tensor=0):
+def broadcast_multigpu(tensor_list, src: GlobalRank, group=None, async_op=False, src_tensor=0):
     """
     Broadcasts the tensor to the whole group with multiple GPU tensors
     per node.
@@ -1169,7 +1176,7 @@ def broadcast_multigpu(tensor_list, src, group=None, async_op=False, src_tensor=
         work.wait()
 
 
-def broadcast(tensor, src, group=None, async_op=False):
+def broadcast(tensor, src: GlobalRank, group=None, async_op=False):
     """
     Broadcasts the tensor to the whole group.
 
@@ -1680,7 +1687,7 @@ def all_gather_object(object_list, obj, group=None):
         object_list[i] = _tensor_to_object(tensor, tensor_size)
 
 
-def gather_object(obj, object_gather_list=None, dst=0, group=None):
+def gather_object(obj, object_gather_list=None, dst:GlobalRank = GlobalRank(0), group=None):
     """
     Gathers picklable objects from the whole group in a single process.
     Similar to :func:`gather`, but Python objects can be passed in. Note that the
@@ -1737,7 +1744,7 @@ def gather_object(obj, object_gather_list=None, dst=0, group=None):
         return
 
     # Ensure object_gather_list is specified appopriately.
-    my_rank = get_rank()
+    my_rank = _global_rank()
     _validate_output_list_for_rank(my_rank, dst, object_gather_list)
     current_device = _get_pg_device(group)
     input_tensor, local_size = _object_to_tensor(obj, current_device)
@@ -2202,7 +2209,7 @@ def all_gather_coalesced(
         work.wait()
 
 
-def _validate_output_list_for_rank(my_rank, dst, gather_list):
+def _validate_output_list_for_rank(my_rank: GlobalRank, dst: GlobalRank, gather_list):
     if dst == my_rank:
         if not gather_list:
             raise ValueError(
@@ -2215,7 +2222,7 @@ def _validate_output_list_for_rank(my_rank, dst, gather_list):
         )
 
 
-def gather(tensor, gather_list=None, dst=0, group=None, async_op=False):
+def gather(tensor, gather_list=None, dst: GlobalRank = GlobalRank(0), group=None, async_op=False):
     """
     Gathers a list of tensors in a single process.
 
@@ -2246,7 +2253,7 @@ def gather(tensor, gather_list=None, dst=0, group=None, async_op=False):
         _warn_not_in_group("gather")
         return
 
-    my_rank = get_rank()
+    my_rank = _global_rank()
     _validate_output_list_for_rank(my_rank, dst, gather_list)
     output_tensors = [gather_list] if dst == my_rank else []
     input_tensors = [tensor]
@@ -2268,7 +2275,7 @@ def gather(tensor, gather_list=None, dst=0, group=None, async_op=False):
         work.wait()
 
 
-def scatter(tensor, scatter_list=None, src=0, group=None, async_op=False):
+def scatter(tensor, scatter_list=None, src: GlobalRank=GlobalRank(0), group=None, async_op=False):
     """
     Scatters a list of tensors to all processes in a group.
 

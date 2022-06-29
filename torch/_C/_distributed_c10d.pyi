@@ -1,10 +1,16 @@
 from datetime import timedelta
 from enum import Enum
-from typing import Optional, List, Any, Tuple, overload
+from typing import Optional, List, Any, Tuple, Union, overload
 
 from torch import Tensor
 
 # This module is defined in torch/csrc/distributed/c10d/init.cpp
+
+
+from typing_extensions import NewType
+
+LocalRank = NewType('LocalRank', int)
+GlobalRank = NewType('GlobalRank', int)
 
 _DEFAULT_FIRST_BUCKET_BYTES: int
 _DEFAULT_NO_TIMEOUT: timedelta
@@ -92,7 +98,7 @@ class AllGatherOptions:
     timeout: timedelta
 
 class GatherOptions:
-    rootRank: int
+    rootRank: LocalRank
     timeout: timedelta
 
 class ScatterOptions:
@@ -149,8 +155,8 @@ class Work:
     def is_success(self) -> bool: ...
     def exception(self) -> Any: ...
     def wait(self, timeout: timedelta = _DEFAULT_NO_TIMEOUT) -> bool: ...
-    def source_rank(self) -> int: ...
-    def _source_rank(self) -> int: ...
+    def source_rank(self) -> LocalRank: ...
+    def _source_rank(self) -> LocalRank: ...
     def result(self) -> List[Tensor]: ...
     def synchronize(self): ...
     ...
@@ -158,7 +164,7 @@ class Work:
 class ProcessGroup:
     class Options: ...
     def __init__(self): ...
-    def rank(self) -> int: ...
+    def rank(self) -> LocalRank: ...
     def size(self) -> int: ...
     @overload
     def broadcast(
@@ -170,7 +176,7 @@ class ProcessGroup:
     def broadcast(
         self,
         tensor: Tensor,
-        root: int,
+        root: LocalRank,
     ) -> Work: ...
     @overload
     def allreduce(
@@ -205,7 +211,7 @@ class ProcessGroup:
     def reduce(
         self,
         tensor: Tensor,
-        root: int,
+        root: LocalRank,
         op=ReduceOp.SUM,
     ) -> Work: ...
     @overload
@@ -245,7 +251,7 @@ class ProcessGroup:
         self,
         output_tensors: List[Tensor],
         input_tensor: Tensor,
-        root: int,
+        root: LocalRank,
     ) -> Work: ...
     @overload
     def scatter(
@@ -259,7 +265,7 @@ class ProcessGroup:
         self,
         output_tensor: Tensor,
         input_tensors: List[Tensor],
-        root: int,
+        root: LocalRank,
     ) -> Work: ...
     @overload
     def reduce_scatter(
@@ -312,13 +318,13 @@ class ProcessGroup:
     def send(
         self,
         tensors: List[Tensor],
-        dstRank: int,
+        dstRank: LocalRank,
         tag: int,
     ) -> Work: ...
     def recv(
         self,
         tensors: List[Tensor],
-        srcRank: int,
+        srcRank: LocalRank,
         tag: int,
     ) -> Work: ...
     def recv_anysource(self, tensors: List[Tensor], tag: int) -> Work: ...
