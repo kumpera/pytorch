@@ -94,6 +94,7 @@ def _sharded_tensor_props_for(sharded_tensor: ShardedTensor) -> TensorInfo:
         size=sharded_tensor.metadata().size,
     )
 
+# FIXME make this a classmethod in TensorProperties
 def _tensor_props_for(tensor: torch.Tensor) -> TensorProperties:
     return TensorProperties(
         dtype=tensor.dtype,
@@ -153,7 +154,7 @@ def _create_for_bytesio(fqn: str, bytes: Any):
         type=WriteItemType.BYTE_IO,
     )
 
-def create_default_metadata_only_plan(state_dict: Dict[str, Any]) -> SavePlan:
+def create_default_metadata_only_plan(state_dict: STATE_DICT_TYPE) -> SavePlan:
     requests = []
     for fqn, obj in state_dict.items():
         if isinstance(obj, ShardedTensor):
@@ -196,7 +197,7 @@ def create_read_item_for_tensor(index, storage_offsets, dest_index, dest_offsets
 
 
 
-def create_default_local_plan(state_dict: Dict[str, Any], is_coordinator: bool):
+def create_default_local_plan(state_dict: STATE_DICT_TYPE, is_coordinator: bool):
     requests = []
     for fqn, obj in state_dict.items():
         if isinstance(obj, ShardedTensor) or is_coordinator:
@@ -263,7 +264,7 @@ def find_shard(tensor: ShardedTensor, index: MetadataIndex) -> Shard:
             return shard
     raise ValueError(f"could not find shard at '{index.offset}' for FQN: '{index.fqn}'")
 
-def find_object(state_dict: Dict[str, Any], index: MetadataIndex) -> Any:
+def find_object(state_dict: STATE_DICT_TYPE, index: MetadataIndex) -> Any:
     obj = state_dict[index.fqn]
     if isinstance(obj, ShardedTensor):
         return find_shard(obj, index).tensor
@@ -369,7 +370,7 @@ def create_read_items(fqn: str, md: STORAGE_TYPES, obj: Any) -> List[ReadItem]:
         local_shards)
 
 def create_default_read_plan(
-    state_dict: Dict[str, Any],
+    state_dict: STATE_DICT_TYPE,
     metadata: Metadata,
 ) -> LoadPlan:
     requests = []
@@ -388,7 +389,12 @@ def create_default_global_read_plan(all_plans: List[LoadPlan]) -> List[LoadPlan]
 
 
 class DefaultSavePlanner(SavePlanner):
-    def init(self, state_dict: Dict[str, Any], is_coordinator: bool) -> None:
+    def init(self, state_dict: STATE_DICT_TYPE, is_coordinator: bool) -> None:
+        if not isinstance(state_dict, dict):
+            raise ValueError("state_dict must be an instance of dict")
+        if not isinstance(is_coordinator, bool):
+            raise ValueError("is_coordinator must be True or False")
+
         self.state_dict = state_dict
         self.is_coordinator = is_coordinator
 

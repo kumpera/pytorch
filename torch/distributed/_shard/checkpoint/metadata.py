@@ -22,6 +22,7 @@ class MetadataIndex:
     def __hash__(self):
         return hash((self.fqn, self.offset,))
 
+# TODO should we inline this object? It makes WriteItem paths kinda annoying
 @dataclass
 class TensorInfo:
     properties: TensorProperties
