@@ -204,6 +204,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                  num_workers, persistent_workers, shared_seed):
     # See NOTE [ Data Loader Multiprocessing Shutdown Logic ] for details on the
     # logic of this function.
+    print("_worker_loop HAHAHAHAAAHAHAHAH")
 
     try:
         # Initialize C side signal handlers for SIGBUS and SIGSEGV. Python signal
@@ -212,7 +213,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
         # again.
         # https://docs.python.org/3/library/signal.html#execution-of-python-signal-handlers
         signal_handling._set_worker_signal_handlers()
-
+        print("_worker_loop ///1")
         torch.set_num_threads(1)
         seed = base_seed + worker_id
         random.seed(seed)
@@ -221,6 +222,8 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
             np_seed = _generate_state(base_seed, worker_id)
             import numpy as np
             np.random.seed(np_seed)
+
+        print("_worker_loop ///2")
 
         from torch.utils.data import IterDataPipe
         from torch.utils.data.graph_settings import apply_random_seed
@@ -238,13 +241,16 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
         from torch.utils.data import _DatasetKind
 
         init_exception = None
+        print("_worker_loop ///3")
 
         try:
             if init_fn is not None:
                 init_fn(worker_id)
 
             fetcher = _DatasetKind.create_fetcher(dataset_kind, dataset, auto_collation, collate_fn, drop_last)
+            print("_worker_loop ///4")
         except Exception:
+            print("_worker_loop ///5")
             init_exception = ExceptionWrapper(
                 where="in DataLoader worker process {}".format(worker_id))
 
@@ -264,12 +270,17 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
 
         watchdog = ManagerWatchdog()
 
+        print("_worker_loop ///6")
         while watchdog.is_alive():
             try:
                 r = index_queue.get(timeout=MP_STATUS_CHECK_INTERVAL)
+                print("_worker_loop ///7")
             except queue.Empty:
+                print("_worker_loop ///8")
                 continue
+            print("_worker_loop ///9")
             if isinstance(r, _ResumeIteration):
+                print("_worker_loop ///10")
                 # Acknowledge the main process
                 data_queue.put((r, None))
                 iteration_end = False
@@ -285,9 +296,11 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                 continue
             elif r is None:
                 # Received the final signal
+                print("_worker_loop ///11")
                 assert done_event.is_set() or iteration_end
                 break
             elif done_event.is_set() or iteration_end:
+                print("_worker_loop ///12")
                 # `done_event` is set. But I haven't received the final signal
                 # (None) yet. I will keep continuing until get it, and skip the
                 # processing steps.
@@ -297,10 +310,14 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
             if init_exception is not None:
                 data = init_exception
                 init_exception = None
+                print("_worker_loop ///13")
             else:
+                print("_worker_loop ///14")
                 try:
                     data = fetcher.fetch(index)
+                    print("_worker_loop ///15")
                 except Exception as e:
+                    print(f"_worker_loop ///16 {e}")
                     if isinstance(e, StopIteration) and dataset_kind == _DatasetKind.Iterable:
                         data = _IterableDatasetStopIteration(worker_id)
                         # Set `iteration_end`
@@ -313,11 +330,18 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                         # See NOTE [ Python Traceback Reference Cycle Problem ]
                         data = ExceptionWrapper(
                             where="in DataLoader worker process {}".format(worker_id))
+            print(f"_worker_loop ///17")
             data_queue.put((idx, data))
             del data, idx, index, r  # save memory
+            print(f"_worker_loop ///18")
+            
     except KeyboardInterrupt:
+        print(f"_worker_loop ///19")
         # Main process will raise KeyboardInterrupt anyways.
         pass
+    print(f"_worker_loop ///20")
     if done_event.is_set():
+        print(f"_worker_loop ///21")
         data_queue.cancel_join_thread()
         data_queue.close()
+    print(f"_worker_loop ///22")

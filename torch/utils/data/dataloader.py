@@ -383,10 +383,13 @@ class DataLoader(Generic[T_co]):
         torch.set_vital('Dataloader', 'enabled', 'True')  # type: ignore[attr-defined]
 
     def _get_iterator(self) -> '_BaseDataLoaderIter':
+        print(f"----_get_iterator {self.num_workers}")
         if self.num_workers == 0:
             return _SingleProcessDataLoaderIter(self)
         else:
+            print(f"----_get_iterator //2")
             self.check_worker_number_rationality()
+            print(f"----_get_iterator //3")
             return _MultiProcessingDataLoaderIter(self)
 
     @property
@@ -1034,6 +1037,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
 
     def __init__(self, loader):
         super(_MultiProcessingDataLoaderIter, self).__init__(loader)
+        print("_MultiProcessingDataLoaderIter::__init__")
 
         assert self._num_workers > 0
         assert self._prefetch_factor > 0
@@ -1058,6 +1062,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             # Need to `cancel_join_thread` here!
             # See sections (2) and (3b) above.
             index_queue.cancel_join_thread()
+            print("_MultiProcessingDataLoaderIter::creating process")
             w = multiprocessing_context.Process(
                 target=_utils.worker._worker_loop,
                 args=(self._dataset_kind, self._dataset, index_queue,
@@ -1075,6 +1080,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             w.start()
             self._index_queues.append(index_queue)
             self._workers.append(w)
+        print("_MultiProcessingDataLoaderIter::creating processes up")
 
         if self._pin_memory:
             self._pin_memory_thread_done_event = threading.Event()
@@ -1093,7 +1099,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             self._pin_memory_thread = pin_memory_thread
         else:
             self._data_queue = self._worker_result_queue
-
+        print("_MultiProcessingDataLoaderIter:: pin memory up")
         # In some rare cases, persistent workers (daemonic processes)
         # would be terminated before `__del__` of iterator is invoked
         # when main process exits
@@ -1105,14 +1111,17 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
             import atexit
             for w in self._workers:
                 atexit.register(_MultiProcessingDataLoaderIter._clean_up_worker, w)
-
+        print("_MultiProcessingDataLoaderIter:: persisnte qwhah")
         # .pid can be None only before process is spawned (not the case, so ignore)
         _utils.signal_handling._set_worker_pids(id(self), tuple(w.pid for w in self._workers))  # type: ignore[misc]
         _utils.signal_handling._set_SIGCHLD_handler()
         self._worker_pids_set = True
         self._reset(loader, first_iter=True)
+        print("_MultiProcessingDataLoaderIter:: done done")
 
     def _reset(self, loader, first_iter=False):
+        print("_MultiProcessingDataLoaderIter:: RESET ><")
+
         super()._reset(loader, first_iter)
         self._send_idx = 0  # idx of the next task to be sent to workers
         self._rcvd_idx = 0  # idx of the next task to be returned in __next__
@@ -1144,6 +1153,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
         # prime the prefetch loop
         for _ in range(self._prefetch_factor * self._num_workers):
             self._try_put_index()
+        print("_MultiProcessingDataLoaderIter:: RESET DONENE")
 
     def _try_get_data(self, timeout=_utils.MP_STATUS_CHECK_INTERVAL):
         # Tries to fetch data from `self._data_queue` once for a given timeout.
@@ -1157,13 +1167,16 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
         #
         # Returns a 2-tuple:
         #   (bool: whether successfully get data, any: data if successful else None)
+        print("_MultiProcessingDataLoaderIter:: TRY GET DATA")
         try:
             data = self._data_queue.get(timeout=timeout)
+            print("_MultiProcessingDataLoaderIter:: GOT SOME DATA")
             return (True, data)
         except Exception as e:
             # At timeout and error, we manually check whether any worker has
             # failed. Note that this is the only mechanism for Windows to detect
             # worker failures.
+            print(f"_MultiProcessingDataLoaderIter:: FAIL {e}")
             failed_workers = []
             for worker_id, w in enumerate(self._workers):
                 if self._workers_status[worker_id] and not w.is_alive():
@@ -1192,6 +1205,7 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
                         " sharing strategy by calling"
                         " `torch.multiprocessing.set_sharing_strategy('file_system')`"
                         " at the beginning of your code") from None
+            print(f"_MultiProcessingDataLoaderIter:: RAISING STUFF")
             raise
 
 # NOTE [ DataLoader on Linux and open files limit ]

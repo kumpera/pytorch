@@ -1,7 +1,8 @@
+import copy
 import bisect
 import itertools
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.distributed as dist
@@ -20,6 +21,14 @@ from torch.distributed._shard.sharding_spec import (
     ShardMetadata,
 )
 
+
+try:
+    from spmd.tensor import DTensor as DistributedTensor, DeviceMesh
+    from spmd.tensor.placement_types import Placement
+    from spmd.tensor.placement_types import Shard as DTShard
+    has_dt = True
+except ImportError:
+    has_dt = False
 
 def _sharding_spec_to_offsets(
     sharding_spec: ShardingSpec, tensor_numel: int, world_size: int
@@ -205,6 +214,80 @@ def _gather_state_dict(
         new_state_dict[key] = tensor
     return new_state_dict
 
+def get_box(tensor: "DistributedTensor") -> Tuple:
+    device_mesh = tensor.device_mesh
+    assert device_mesh.ndim == 1, f"Only 1D DeviceMeshes currently handled"
+    # assert tensor.placements[0].is_shard(), f"Only sharded placement supported"
+
+    placement = tensor.placements[0]
+    offsets = [0] * len(tensor.size())
+    num_chunks = device_mesh.size(dim=0)
+
+    if tensor.placements[0].is_shard():
+        shard_dim = placement.dim
+        chunk_size = tensor.size(shard_dim) // num_chunks
+        offsets[shard_dim] = chunk_size
+
+    return (torch.Size(offsets), tensor._local_tensor.size())
+
+def get_box_for(tensor: "DistributedTensor", idx: int) -> Tuple:
+    offsets, size = get_box(tensor)
+    offsets = [val * idx for val in offsets]
+    return (torch.Size(offsets), size)
+
+def get_local_box(tensor: "DistributedTensor") -> Tuple:
+    device_mesh = tensor.device_mesh
+    return get_box_for(tensor, device_mesh.get_coordinate_on_dim(0))
+
+
+def create_shard_md_from_dt(dt: "DistributedTensor", current_rank) -> ShardMetadata:
+    mesh = dt.device_mesh
+    assert mesh.ndim == 1, f"Only 1D DeviceMeshes currently handled"
+
+    offsets, sizes = get_local_box(dt)
+    return ShardMetadata(
+        shard_offsets=list(offsets),
+        shard_sizes=list(sizes),
+        placement=f"rank:{current_rank}/{dt._local_tensor.device}"
+    )
+
+def create_sharded_tensor_md_from_dt(dt: "DistributedTensor", dt_pg) -> ShardedTensorMetadata:
+    # This is where it goes hilarious, we have to produce a ShardedTensor that has full coverage
+    # and yet has only one valid shard for the current rank.
+
+    shards_md = []
+    my_rank = dist.get_rank(dt_pg)
+    scapegoat_rank = 0 if my_rank > 0 else 1
+
+    if dt.placements[0].is_shard():
+        shard_count = dt_pg.size()
+    else:
+        shard_count = 1 #
+
+    for i in range(shard_count):
+        offsets, sizes = get_box_for(dt, i)
+        shards_md.append(ShardMetadata(
+            shard_offsets=list(offsets),
+            shard_sizes=list(sizes),
+            placement=f"rank:{scapegoat_rank}/{dt._local_tensor.device}"
+        ))
+
+    return ShardedTensorMetadata(
+        shards_metadata=shards_md,
+        size=dt.size(),
+        tensor_properties=TensorProperties(
+            dtype=dt.dtype,
+            layout=dt.layout,
+            requires_grad=dt.requires_grad,
+            #ignore memory_format and pin_memory as those are not supported by DT
+        )
+    )
+
+def get_dt_pg(dt: "DistributedTensor") -> dist.ProcessGroup:
+    mesh = dt.device_mesh
+    assert mesh.ndim == 1, f"Only 1D DeviceMeshes currently handled"
+    return mesh.get_dim_groups()[0]
+
 
 def _create_chunk_sharded_tensor(
     tensor: torch.Tensor,
@@ -216,7 +299,81 @@ def _create_chunk_sharded_tensor(
     """
     Shard a tensor to chunks along the first dimension. The local rank will gets its
     corresponding chunk as the local shard to create a ShardedTensor.
+
+    This method handle sharding ShardedTensor and DistributedTensor
     """
+    if isinstance(tensor, ShardedTensor):
+        assert len(tensor.local_shards()) == 1
+
+        inner_param = tensor.local_tensor()
+        inner_st = _create_chunk_sharded_tensor_inner(
+            inner_param,
+            rank,
+            world_size,
+            torch.cuda.device_count(),
+            pg,
+        )
+
+        outer_local_shard = tensor.local_shards()[0]
+        shards: List[Shard] = [
+            Shard(inner_st, copy.deepcopy(outer_local_shard.metadata))
+        ]
+        st_meta = copy.deepcopy(tensor.metadata())
+        st_meta.tensor_properties.requires_grad = False
+
+        st_outer = ShardedTensor._init_from_local_shards_and_global_metadata(
+            shards,
+            sharded_tensor_metadata=st_meta,
+            process_group=tensor._process_group,
+            init_rrefs=False
+        )
+        return st_outer
+    elif has_dt and isinstance(tensor, DistributedTensor):
+        device_mesh = tensor.device_mesh
+        assert device_mesh.ndim == 1, f"Only 1D DeviceMeshes currently handled"
+
+        inner_param = tensor._local_tensor
+
+        inner_st = _create_chunk_sharded_tensor_inner(
+            inner_param,
+            rank,
+            world_size,
+            torch.cuda.device_count(),
+            pg,
+        )
+
+        dt_pg = get_dt_pg(tensor)
+        # We do this differently here, we create a ST with no local shards then patch it
+        shards = []
+        st_meta = create_sharded_tensor_md_from_dt(tensor, dt_pg)
+        st_meta.tensor_properties.requires_grad = False
+
+        st_outer = ShardedTensor._init_from_local_shards_and_global_metadata(
+            shards,
+            sharded_tensor_metadata=st_meta,
+            process_group=dt_pg,
+            init_rrefs=False
+        )
+        st_outer._local_shards.append(Shard(inner_st, create_shard_md_from_dt(tensor, dist.get_rank(dt_pg))))
+
+        return st_outer
+
+    else:
+        return _create_chunk_sharded_tensor_inner(
+            tensor,
+            rank,
+            world_size,
+            device_per_node,
+            pg)
+
+
+def _create_chunk_sharded_tensor_inner(
+    tensor: torch.Tensor,
+    rank: int,
+    world_size: int,
+    device_per_node: int,
+    pg: dist.ProcessGroup,
+) -> ShardedTensor:
     chunks = tensor.chunk(world_size, dim=0)
     if len(chunks) > rank:
         local_shard = chunks[rank].clone()
@@ -241,6 +398,8 @@ def _create_chunk_sharded_tensor(
         ShardMetadata(offset, size, placement)
         for offset, size, placement in zip(chunk_offsets, chunk_sizes, placements)
     ]
+
+    # is_pinned = tensor.is_pinned() if isinstance(tensor, ShardedTensor) else False
     sharded_tensor_metadata = ShardedTensorMetadata(
         shards_metadata=shard_metadata,
         size=tensor.size(),
@@ -249,7 +408,7 @@ def _create_chunk_sharded_tensor(
             layout=tensor.layout,
             requires_grad=False,
             memory_format=torch.contiguous_format,
-            pin_memory=tensor.is_pinned(),
+            # pin_memory=tensor.is_pinned(), # DT doesn't implement is_pinned
         )
     )
     return ShardedTensor._init_from_local_shards_and_global_metadata(

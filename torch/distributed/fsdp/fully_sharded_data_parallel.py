@@ -54,6 +54,17 @@ from torch.distributed.utils import (
 )
 from torch.nn.parameter import Parameter
 
+try:
+    from spmd.tensor import DTensor as DistributedTensor
+    has_dt = True
+    def is_distributed_tensor(obj):
+        return isinstance(obj, DistributedTensor)
+
+except ImportError:
+    has_dt = False
+    def is_distributed_tensor(obj):
+        return False
+
 from ._optim_utils import (
     _broadcast_pos_dim_tensor_states,
     _broadcast_processed_optim_state_dict,
@@ -2487,7 +2498,14 @@ class FullyShardedDataParallel(nn.Module):
 
             # All-gather the param (ShardedTensor)
             shards = param.local_shards()
-            local_tensor = cast(torch.Tensor, shards[0].tensor).flatten()
+            if len(shards) == 1 and isinstance(shards[0].tensor, ShardedTensor):
+                param = shards[0].tensor
+                shards = param.local_shards()
+
+            if len(shards) == 0:
+                local_tensor = torch.tensor([], dtype=param.dtype, device=self.compute_device)
+            else:
+                local_tensor = cast(torch.Tensor, shards[0].tensor).flatten()
             dim_0_size = param.size()[0]
             param_numel = param.size().numel()
             chunk_size = (
@@ -4209,7 +4227,10 @@ def _get_param_to_unflat_param_names(
         if not isinstance(module, FullyShardedDataParallel):
             for param_name, param in module.named_parameters(recurse=False):
                 module_prefixed_param_names = (
-                    param._prefixed_param_names if type(param) is FlatParameter
+                    param._prefixed_param_names 
+                    if type(param) is FlatParameter
+                    and not isinstance(param, ShardedTensor)
+                    and not is_distributed_tensor(param)
                     else [param_name]
                 )  # prefixed from `module`
                 fully_prefixed_param_names = [
