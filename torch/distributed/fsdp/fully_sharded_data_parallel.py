@@ -52,7 +52,7 @@ from torch.distributed.utils import (
     _to_kwargs,
 )
 from torch.nn.parameter import Parameter
-from spmd.tensor import Tensor as DistributedTensor
+
 
 from ._optim_utils import (
     _broadcast_pos_dim_tensor_states,
@@ -101,6 +101,7 @@ if _TORCH_FX_AVAIL:
         _patch_tracer,
     )
 
+from .tensor_tenderizer import is_distributed_tensor
 
 __all__ = [
     "FullyShardedDataParallel", "ShardingStrategy", "MixedPrecision",
@@ -1992,16 +1993,49 @@ class FullyShardedDataParallel(nn.Module):
             for fqn, _, _ in self._param_fqns:
                 # Create a ShardedTensor for the unflattened, non-sharded parameter.
                 param = functools.reduce(getattr, fqn.split("."), self.module)
-                local_shard = param.chunk(self.world_size)[self.rank].clone()
-                offsets = [0 for _ in param.size()]
-                offsets[0] = math.ceil(param.size()[0] / self.world_size) * self.rank
-                local_shards = [
-                    Shard.from_tensor_and_offsets(local_shard, offsets, self.rank)
-                ]
-                fqn = f"{prefix}{fqn}"
-                state_dict[fqn] = init_from_local_shards(
-                    local_shards, param.size(), process_group=self.process_group
-                )  # type: ignore[assignment]
+                if isinstance(param, ShardedTensor):
+                    print(f"FOR FQN {fqn} I found a ShardedTensor with size: {param.size()}")
+                    # We have to insert a similar ST. 
+                    assert len(param.local_shards()) == 1
+
+                    inner_param = param.local_tensor()
+                    local_shard = inner_param .chunk(self.world_size)[self.rank].clone()
+                    offsets = [0 for _ in inner_param .size()]
+                    offsets[0] = math.ceil(inner_param .size()[0] / self.world_size) * self.rank
+                    local_shards = [
+                        Shard.from_tensor_and_offsets(local_shard, offsets, self.rank)
+                    ]
+                    inner_st = init_from_local_shards(
+                        local_shards, inner_param.size(), process_group=self.process_group
+                    )
+
+                    # This is copied from ST:cpu()
+                    outer_local_shard = param.local_shards()[0]
+                    shards: List[Shard] = [
+                        Shard(inner_st, copy.deepcopy(outer_local_shard.metadata))
+                    ]
+                    st_meta = copy.deepcopy(param.metadata())
+
+                    pg = param._process_group
+                    st_outer = ShardedTensor._init_from_local_shards_and_global_metadata(
+                        shards,
+                        sharded_tensor_metadata=st_meta,
+                        process_group=pg,
+                        init_rrefs=False
+                    )
+                    fqn = f"{prefix}{fqn}"
+                    state_dict[fqn] = st_outer
+                else:
+                    local_shard = param.chunk(self.world_size)[self.rank].clone()
+                    offsets = [0 for _ in param.size()]
+                    offsets[0] = math.ceil(param.size()[0] / self.world_size) * self.rank
+                    local_shards = [
+                        Shard.from_tensor_and_offsets(local_shard, offsets, self.rank)
+                    ]
+                    fqn = f"{prefix}{fqn}"
+                    state_dict[fqn] = init_from_local_shards(
+                        local_shards, param.size(), process_group=self.process_group
+                    )  # type: ignore[assignment]
         state_dict.pop(f"{prefix}{FLAT_PARAM}")
         return state_dict
 
@@ -4249,7 +4283,7 @@ def _get_param_to_unflat_param_names(
                     param._prefixed_param_names
                     if isinstance(param, FlatParameter)
                     and not isinstance(param, ShardedTensor)
-                    and not isinstance(param, DistributedTensor)
+                    and not is_distributed_tensor(param)
                     else [param_name]
                 )  # prefixed from `module`
                 fully_prefixed_param_names = [

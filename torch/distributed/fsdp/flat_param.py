@@ -20,8 +20,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch.distributed._shard.sharded_tensor.api import ShardedTensor
-from spmd.tensor import Tensor as DistributedTensor, DeviceMesh
-from spmd.tensor.placement_types import Placement
+
+from .tensor_tenderizer import is_distributed_tensor
 
 
 __all__ = [
@@ -82,8 +82,8 @@ class STShardingInfo(NamedTuple):
     sharding_spec: Optional[shard_spec.ShardingSpec]
     global_size: Optional[torch.Size]
     process_group: Optional[dist.ProcessGroup]
-    device_mesh: Optional[DeviceMesh]
-    placements: Optional[List[Placement]]
+    device_mesh: Optional["DeviceMesh"]
+    placements: Optional[List["Placement"]]
 
 
 class FlatParameter(nn.Parameter):
@@ -274,7 +274,7 @@ class FlatParamHandle:
                             )
                         )
                         param = param.local_tensor()
-                    elif isinstance(param, DistributedTensor):
+                    elif is_distributed_tensor(param):
                         st_sharding_infos.append(
                             STShardingInfo(
                                 None,
