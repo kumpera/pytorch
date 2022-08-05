@@ -38,6 +38,14 @@ def mock_init_dist(rank, world_size):
         group_name="fake",
         timeout=timedelta(seconds=1))
 
+def mock_new_group(ranks):
+    # This the same trick from mock_init_dist
+    default_store = dist.distributed_c10d._get_default_store()
+    group_number = dist.distributed_c10d._group_count
+    store_key = f"{c10d.STORE_BASED_BARRIER_PREFIX}:{group_number + 1}"
+    default_store.add(store_key, dist.get_world_size() - 1)
+    return dist.new_group(ranks)
+
 @contextmanager
 def with_dist(rank=0, world_size=2):
     """
