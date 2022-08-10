@@ -51,6 +51,8 @@ class _StorageInfo:
 class _StoragePrefix:
     prefix: str
 
+DEFAULT_SUFIX=".distcp"
+
 
 def result_from_write_item(item: WriteItem, size_in_bytes, storage_data) -> WriteResult:
     return WriteResult(
@@ -222,7 +224,7 @@ def _write_files_from_queue(
 ):
     try:
         while True:
-            file_name, write_items = file_queue.get_nowait()
+            file_path, file_name, write_items = file_queue.get_nowait()
             loader: _TensorLoader
 
             if torch.cuda.is_available() and inflight_threshhold > 0:
@@ -243,7 +245,7 @@ def _write_files_from_queue(
             bytes_w = [wi for wi in write_items if wi.type == WriteItemType.BYTE_IO]
             write_results = []
 
-            with open(file_name, "wb") as stream:
+            with open(file_path, "wb") as stream:
                 for write_item in bytes_w:
                     data = planner.resolve_data(write_item)
                     write_results.append(_write_item(stream, data, write_item, file_name))
@@ -324,17 +326,19 @@ class FileSystemWriter(StorageWriter):
 
         def gen_file():
             nonlocal file_count
-            file_name = f"{storage_plan.prefix}{file_count}"
+            file_name = f"{storage_plan.prefix}{file_count}{DEFAULT_SUFIX}"
             file_count += 1
             return file_name
 
         file_queue: queue.Queue = queue.Queue()
         if self.single_file_per_rank:
             for bucket in _split_by_size_and_type(self.thread_count, plan.items):
-                file_queue.put((self.path / gen_file(), bucket))
+                file_name = gen_file()
+                file_queue.put((self.path / file_name, file_name, bucket))
         else:
             for item in plan.items:
-                file_queue.put((self.path / gen_file(), [item]))
+                file_name = gen_file()
+                file_queue.put((self.path / file_name, file_name, [item]))
 
         result_queue: queue.Queue = queue.Queue()
 
