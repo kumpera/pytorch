@@ -2000,48 +2000,13 @@ class FullyShardedDataParallel(nn.Module):
             for fqn, _, _ in self._param_fqns:
                 # Create a ShardedTensor for the unflattened, non-sharded parameter.
                 param = functools.reduce(getattr, fqn.split("."), self.module)
-                if isinstance(param, ShardedTensor):
-                    # print(f"FOR FQN {fqn} I found a ShardedTensor with size: {param.size()}")
-                    # We have to insert a similar ST. 
-                    assert len(param.local_shards()) == 1
-
-                    inner_param = param.local_tensor()
-                    inner_st =  _create_chunk_sharded_tensor(
-                        inner_param,
-                        self.rank,
-                        self.world_size,
-                        torch.cuda.device_count(),
-                        self.process_group,
-                    )
-
-                    # This is copied from ST:cpu()
-                    outer_local_shard = param.local_shards()[0]
-                    shards: List[Shard] = [
-                        Shard(inner_st, copy.deepcopy(outer_local_shard.metadata))
-                    ]
-                    st_meta = copy.deepcopy(param.metadata())
-                    st_meta.tensor_properties.requires_grad = False
-
-                    pg = param._process_group
-                    st_outer = ShardedTensor._init_from_local_shards_and_global_metadata(
-                        shards,
-                        sharded_tensor_metadata=st_meta,
-                        process_group=pg,
-                        init_rrefs=False
-                    )
-                    fqn = f"{prefix}{fqn}"
-                    state_dict[fqn] = st_outer
-                else:
-                    local_shard = param.chunk(self.world_size)[self.rank].clone()
-                    offsets = [0 for _ in param.size()]
-                    offsets[0] = math.ceil(param.size()[0] / self.world_size) * self.rank
-                    local_shards = [
-                        Shard.from_tensor_and_offsets(local_shard, offsets, self.rank)
-                    ]
-                    fqn = f"{prefix}{fqn}"
-                    state_dict[fqn] = init_from_local_shards(
-                        local_shards, param.size(), process_group=self.process_group
-                    )  # type: ignore[assignment]
+                fqn = f"{prefix}{fqn}"
+                state_dict[fqn] = _create_chunk_sharded_tensor(
+                    param,
+                    self.rank,
+                    self.world_size,
+                    self.process_group
+                )  # type: ignore[assignment]
         state_dict.pop(f"{prefix}{FLAT_PARAM}")
         return state_dict
 
@@ -3780,6 +3745,8 @@ class FullyShardedDataParallel(nn.Module):
 
         .. warning:: The returned state dict contains ShardedTensor and cannot be
             directly used by the regular ``optim.load_state_dict``.
+
+        N.B. All optimizer state tensors be moved to CPU in the result dict
         """
 
         # TODO: The ultimate goal of the optimizer state APIs should be the same

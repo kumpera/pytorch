@@ -1,3 +1,4 @@
+import copy
 import contextlib
 from itertools import accumulate, chain
 from typing import (
@@ -16,6 +17,13 @@ from typing import (
 import torch
 import torch.distributed as dist
 import torch.distributed._shard.sharding_spec as shard_spec
+from torch.distributed._shard.sharded_tensor.metadata import (
+    TensorProperties,
+    ShardedTensorMetadata
+)
+from torch.distributed._shard.sharding_spec.chunk_sharding_spec import ChunkShardingSpec
+from torch.distributed.remote_device import _remote_device
+
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
@@ -605,7 +613,11 @@ class FlatParamHandle:
         if sharding_info.sharding_spec is not None:
             sharded_tensor = ShardedTensor._init_from_local_tensor(
                 tensor,
-                sharding_info.sharding_spec,
+                rewrite_spec_if_needed(
+                    sharding_info.sharding_spec,
+                    tensor,
+                    dist.get_rank(sharding_info.process_group)
+                ),
                 sharding_info.global_size,
                 process_group=sharding_info.process_group,
             )
@@ -619,3 +631,27 @@ class FlatParamHandle:
             raise ValueError("Invalid cases in _to_sharded_tensor")
         sharded_tensor._flattened = True
         return sharded_tensor
+
+def rewrite_spec_if_needed(spec: shard_spec.ShardingSpec, tensor: torch.Tensor, rank: int):
+    """
+    Rewrite ``spec`` to match the device of ``tensor``.
+
+    FSDP.sharded_optim_state_dict sneakly ships optimizer state to CPU so if the original ShardingSpec
+    produces CUDA metadata, ST construction bombs.
+    """
+    if not isinstance(spec, ChunkShardingSpec):
+        return spec
+
+    # let's see if we need
+    rewrite = False
+    for p in spec.placements:
+        if p.rank() == rank and p.device() != tensor.device:
+            rewrite = True
+            break
+    if rewrite:
+        spec = copy.deepcopy(spec)
+        for i, placement in enumerate(spec.placements):
+            if placement.rank() == rank and placement.device() != tensor.device:
+                spec.placements[i] = _remote_device(f"rank:{rank}/{tensor.device}")
+
+    return spec
