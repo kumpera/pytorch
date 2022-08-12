@@ -63,6 +63,8 @@ except ImportError:
     def is_distributed_tensor(obj):
         return False
 
+from ._shard_utils import _create_chunk_sharded_tensor
+
 from ._optim_utils import (
     _broadcast_pos_dim_tensor_states,
     _broadcast_processed_optim_state_dict,
@@ -1999,19 +2001,17 @@ class FullyShardedDataParallel(nn.Module):
                 # Create a ShardedTensor for the unflattened, non-sharded parameter.
                 param = functools.reduce(getattr, fqn.split("."), self.module)
                 if isinstance(param, ShardedTensor):
-                    print(f"FOR FQN {fqn} I found a ShardedTensor with size: {param.size()}")
+                    # print(f"FOR FQN {fqn} I found a ShardedTensor with size: {param.size()}")
                     # We have to insert a similar ST. 
                     assert len(param.local_shards()) == 1
 
                     inner_param = param.local_tensor()
-                    local_shard = inner_param .chunk(self.world_size)[self.rank].clone()
-                    offsets = [0 for _ in inner_param .size()]
-                    offsets[0] = math.ceil(inner_param .size()[0] / self.world_size) * self.rank
-                    local_shards = [
-                        Shard.from_tensor_and_offsets(local_shard, offsets, self.rank)
-                    ]
-                    inner_st = init_from_local_shards(
-                        local_shards, inner_param.size(), process_group=self.process_group
+                    inner_st =  _create_chunk_sharded_tensor(
+                        inner_param,
+                        self.rank,
+                        self.world_size,
+                        torch.cuda.device_count(),
+                        self.process_group,
                     )
 
                     # This is copied from ST:cpu()
@@ -2020,6 +2020,7 @@ class FullyShardedDataParallel(nn.Module):
                         Shard(inner_st, copy.deepcopy(outer_local_shard.metadata))
                     ]
                     st_meta = copy.deepcopy(param.metadata())
+                    st_meta.tensor_properties.requires_grad = False
 
                     pg = param._process_group
                     st_outer = ShardedTensor._init_from_local_shards_and_global_metadata(
