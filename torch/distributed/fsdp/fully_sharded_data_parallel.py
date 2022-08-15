@@ -111,8 +111,6 @@ if _TORCH_FX_AVAIL:
         _patch_tracer,
     )
 
-from .tensor_tenderizer import is_distributed_tensor
-
 __all__ = [
     "FullyShardedDataParallel", "ShardingStrategy", "MixedPrecision",
     "CPUOffload", "BackwardPrefetch", "StateDictType", "StateDictConfig",
