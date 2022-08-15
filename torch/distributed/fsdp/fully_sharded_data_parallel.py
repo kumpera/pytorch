@@ -2005,6 +2005,7 @@ class FullyShardedDataParallel(nn.Module):
                     param,
                     self.rank,
                     self.world_size,
+                    torch.cuda.device_count(),
                     self.process_group
                 )  # type: ignore[assignment]
         state_dict.pop(f"{prefix}{FLAT_PARAM}")
