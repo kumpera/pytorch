@@ -87,8 +87,8 @@ class STShardingInfo(NamedTuple):
     sharding_spec: Optional[shard_spec.ShardingSpec]
     global_size: Optional[torch.Size]
     process_group: Optional[dist.ProcessGroup]
-    device_mesh: Optional[DeviceMesh]
-    placements: Optional[List[Placement]]
+    device_mesh: Optional["DeviceMesh"]
+    placements: Optional[List["Placement"]]
 
 
 class FlatParameter(nn.Parameter):

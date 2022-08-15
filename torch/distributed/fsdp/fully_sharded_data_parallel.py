@@ -52,7 +52,17 @@ from torch.distributed.utils import (
     _to_kwargs,
 )
 from torch.nn.parameter import Parameter
-from spmd.tensor import Tensor as DistributedTensor
+
+try:
+    from spmd.tensor import Tensor as DistributedTensor
+    has_dt = True
+    def is_distributed_tensor(obj):
+        return isinstance(obj, DistributedTensor)
+
+except ImportError:
+    has_dt = False
+    def is_distributed_tensor(obj):
+        return False
 
 from ._optim_utils import (
     _broadcast_pos_dim_tensor_states,
@@ -4249,7 +4259,7 @@ def _get_param_to_unflat_param_names(
                     param._prefixed_param_names
                     if isinstance(param, FlatParameter)
                     and not isinstance(param, ShardedTensor)
-                    and not isinstance(param, DistributedTensor)
+                    and not is_distributed_tensor(param)
                     else [param_name]
                 )  # prefixed from `module`
                 fully_prefixed_param_names = [
