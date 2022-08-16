@@ -253,6 +253,7 @@ def _flatten_optim_state_dict(
     optim_state_dict: Dict[str, Any],
     model: torch.nn.Module,
     shard_state: bool,
+    process_group: dist.ProcessGroup
 ) -> Dict[str, Any]:
     """
     Flattens the full optimizer state dict, still keying by unflattened
@@ -283,7 +284,7 @@ def _flatten_optim_state_dict(
             fsdp_module = flat_param_to_fsdp_module[param]
             flat_state = _flatten_optim_state(
                 unflat_osd_state, unflat_param_names, fsdp_module, param,
-                shard_state,
+                shard_state, process_group
             )
             key = _OptimStateKey(tuple(unflat_param_names), True)
             flat_osd_state[key] = flat_state
@@ -310,6 +311,7 @@ def _flatten_optim_state(
     fsdp_module,
     flat_param: FlatParameter,
     shard_state: bool,
+    process_group: dist.ProcessGroup
 ) -> Dict[str, Any]:
     """
     Flattens the optimizer state in ``full_optim_state_dict`` for a single
@@ -355,11 +357,12 @@ def _flatten_optim_state(
     # There may still be some unflattened parameters with state and some
     # without
     unflat_param_states = [
-        _gather_state_dict(unflat_osd_state[unflat_param_name])
+        _gather_state_dict(unflat_osd_state[unflat_param_name], pg=process_group)
         if unflat_param_name in unflat_osd_state
         else None
         for unflat_param_name in unflat_param_names
     ]
+
     # Check that the unflattened parameters have the same state names
     state_names = None
     for unflat_param_state in unflat_param_states:

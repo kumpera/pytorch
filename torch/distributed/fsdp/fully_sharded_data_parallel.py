@@ -3842,6 +3842,7 @@ class FullyShardedDataParallel(nn.Module):
                 List[Dict[str, Any]], Iterable[torch.nn.Parameter],
             ]
         ] = None,
+        process_group: Optional[dist.ProcessGroup] = None
     ) -> Dict[str, Any]:
         """
         The API is similar to :meth:``shard_full_optim_state_dict``. The only
@@ -3869,6 +3870,7 @@ class FullyShardedDataParallel(nn.Module):
             sharded_optim_state_dict,
             model=model,
             shard_state=True,
+            process_group=process_group,
         )
         return _rekey_sharded_optim_state_dict(flattened_osd, model, optim_input)
 
