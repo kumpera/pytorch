@@ -1,6 +1,7 @@
 import contextlib
 from itertools import accumulate, chain
 from typing import (
+    Any,
     Dict,
     Generator,
     Iterator,
@@ -17,6 +18,33 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from torch.distributed._shard.sharded_tensor import ShardedTensor
+
+class TensorFlattener:
+    def is_instance(self, obj) -> bool:
+        pass
+
+    def transform_param(self, param: torch.Tensor) -> Tuple[Optional[Any], torch.Tensor]:
+        pass
+
+    def get_unflat_views(self, param_ext: Any, subview: torch.Tensor) -> torch.Tensor:
+        pass
+
+    def _create_chunk_sharded_tensor(
+        tensor: torch.Tensor,
+        rank: int,
+        world_size: int,
+        device_per_node: int,
+        process_group: torch.distributed.ProcessGroup
+    ) -> Optional[ShardedTensor]:
+        pass
+
+
+_flattener: TensorFlattener = None
+
+def _set_tensor_flatrener(ext: TensorFlattener) -> None:
+    global _flattener
+    _flattener = ext
 
 __all__ = [
     "FlatParameter", "FlatParamHandle", "FlatParamShardMetadata",
@@ -142,6 +170,7 @@ class FlatParameter(nn.Parameter):
         shapes: List[torch.Size],
         prefixed_param_names: List[str],
         shared_param_infos: List[SharedParamInfo],
+        param_extensions: Dict[int, Any]
     ) -> None:
         """
         Initializes attributes holding metadata about the original parameters
@@ -167,6 +196,7 @@ class FlatParameter(nn.Parameter):
         self._shapes = tuple(shapes)
         self._prefixed_param_names = tuple(prefixed_param_names)
         self._shared_param_infos = tuple(shared_param_infos)
+        self._param_extensions = param_extensions
         self._is_sharded = False
         self._unsharded_size = self.size()
 
@@ -221,6 +251,8 @@ class FlatParamHandle:
         shared_param_infos: List[SharedParamInfo] = []
         shared_param_memo: Dict[nn.Parameter, Tuple[nn.Module, str, str]] = {}
         params_to_flatten: List[nn.Parameter] = []
+        param_extensions: Dict[int, Any] = {}
+
         dtype: Optional[torch.dtype] = None
         requires_grad: Optional[bool] = None
         for submodule_name, submodule in module.named_modules():
@@ -234,7 +266,7 @@ class FlatParamHandle:
                         prim_module, prim_module_name,
                     ))
                 else:
-                    if isinstance(param, FlatParameter):
+                    if type(param) is FlatParameter:
                         raise ValueError("`FlatParameter` does not support nesting")
                     if dtype is not None and param.dtype != dtype:
                         raise ValueError(
@@ -243,6 +275,12 @@ class FlatParamHandle:
                         )
                     if requires_grad is not None and param.requires_grad != requires_grad:
                         raise ValueError("`FlatParameter` requires uniform `requires_grad`")
+                    if _flattener is not None:
+                        extension, new_param = _flattener.transform_param(param)
+                        if extension is not None:
+                            param = new_param
+                            param_extensions[len(param_infos)] = extension
+
                     dtype = param.dtype
                     requires_grad = param.requires_grad
                     shared_param_memo[param] = (submodule, submodule_name, param_name)
@@ -256,7 +294,7 @@ class FlatParamHandle:
         assert requires_grad is not None
         self.flat_param = FlatParamHandle.flatten_params(params_to_flatten, requires_grad)
         self.flat_param.init_metadata(
-            param_infos, numels, shapes, prefixed_param_names, shared_param_infos,
+            param_infos, numels, shapes, prefixed_param_names, shared_param_infos, param_extensions
         )
 
     @staticmethod
@@ -302,9 +340,11 @@ class FlatParamHandle:
             f"Expects {flat_param._unsharded_size.numel()} numel but got " \
             f"{tensor.numel()} numel"
         views = (
-            subtensor.view(shape) for (subtensor, shape) in
+            subtensor.view(shape) for idx, (subtensor, shape) in
             zip(torch.split(tensor, flat_param._numels, dim=0), flat_param._shapes)  # type: ignore[arg-type]
         )
+        for idx, param_ext in flat_param._param_extensions:
+            views[idx] = _flattener.get_unflat_views(param_ext, views[idx])
         return views
 
     def _unflatten(self, as_params: bool) -> None:
