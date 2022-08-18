@@ -285,7 +285,7 @@ def create_default_global_save_plan(all_plans: List[SavePlan]) -> Tuple[List[Sav
         new_items = []
         for item in plan.items:
             if not item.type == WriteItemType.SHARD:
-                assert item.index.fqn not in md
+                assert item.index.fqn not in md, f"duplicate non-sharded item {item.index}"
 
             if item.type == WriteItemType.BYTE_IO:
                 md[item.index.fqn] = BytesStorageMetadata()
