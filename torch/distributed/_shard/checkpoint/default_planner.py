@@ -7,7 +7,6 @@ import torch
 from torch.distributed._shard._utils import narrow_tensor_by_index
 from torch.distributed._shard.sharded_tensor import ShardedTensor
 
-
 from .planner import (
     SavePlanner,
     LoadPlanner,
@@ -111,7 +110,6 @@ class DefaultLoadPlanner(LoadPlanner):
         This is an extension from the planner interface to make it easy to extend the default planner
         """
         return narrow_tensor_by_index(tensor, read_item.dest_offsets, read_item.lengths)
-
 
 def create_default_local_load_plan(
     state_dict: Dict[str, Any],

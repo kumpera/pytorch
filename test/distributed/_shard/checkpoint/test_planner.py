@@ -24,11 +24,18 @@ from torch.testing._internal.distributed.distributed_utils import (
     with_dist
 )
 
+<<<<<<< HEAD
 from torch.distributed._shard.checkpoint.default_planner import (
     create_default_global_save_plan,
     create_default_local_save_plan,
     create_default_local_load_plan,
     _create_default_local_metadata
+=======
+from torch.distributed._shard.checkpoint.resharding import (
+    create_default_global_save_plan,
+    create_default_local_save_plan,
+    create_default_local_load_plan,
+>>>>>>> cac43d2055... Implement checkpoint planning.
 )
 
 if TEST_WITH_DEV_DBG_ASAN:
@@ -38,12 +45,20 @@ if TEST_WITH_DEV_DBG_ASAN:
     )
     sys.exit(0)
 
+<<<<<<< HEAD
 def create_sharded_tensor(rank, world_size, shards_per_rank, shard_size=8):
+=======
+def create_sharded_tensor(rank, world_size, shards_per_rank):
+>>>>>>> cac43d2055... Implement checkpoint planning.
     shards_metadata = []
     local_shards = []
     for idx in range(0, world_size * shards_per_rank):
         shard_rank = idx // shards_per_rank
+<<<<<<< HEAD
         shard_md = ShardMetadata(shard_offsets=[idx * shard_size], shard_sizes=[shard_size], placement=f"rank:{shard_rank}/cpu")
+=======
+        shard_md = ShardMetadata(shard_offsets=[idx * 8], shard_sizes=[8], placement=f"rank:{shard_rank}/cpu")
+>>>>>>> cac43d2055... Implement checkpoint planning.
         shards_metadata.append(shard_md)
         if shard_rank == rank:
             shard = Shard.from_tensor_and_offsets(
@@ -55,7 +70,11 @@ def create_sharded_tensor(rank, world_size, shards_per_rank, shard_size=8):
 
     sharded_tensor_md = ShardedTensorMetadata(
         shards_metadata=shards_metadata,
+<<<<<<< HEAD
         size=torch.Size([shard_size * len(shards_metadata)]),
+=======
+        size=torch.Size([8 * len(shards_metadata)]),
+>>>>>>> cac43d2055... Implement checkpoint planning.
         tensor_properties=TensorProperties.create_from_tensor(torch.zeros(1))
     )
 
@@ -116,6 +135,7 @@ class TestSavePlan(TestCase):
 
         all_plans = [create_data(0), create_data(1), create_data(2), create_data(3)]
         final_plans, metadata = create_default_global_save_plan(all_plans=all_plans)
+
         # The default global plan updates all indexes to include hints
         for new_plan, old_plan in zip(final_plans, all_plans):
             for new_item, old_item in zip(new_plan.items, old_plan.items):

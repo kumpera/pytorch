@@ -152,6 +152,7 @@ class SavePlanner(abc.ABC):
     >>>         metadata = replace(metadata, planner_data=merged_data)
     >>>         return global_plan, metadata
     """
+
     @abc.abstractmethod
     def init(self, state_dict: STATE_DICT_TYPE, is_coordinator: bool) -> None:
         """
