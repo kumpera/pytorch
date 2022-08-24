@@ -53,7 +53,7 @@ from torch.distributed.utils import (
 from torch.nn.parameter import Parameter
 
 try:
-    from spmd.tensor import Tensor as DistributedTensor
+    from spmd.tensor import DTensor as DistributedTensor
     has_dt = True
     def is_distributed_tensor(obj):
         return isinstance(obj, DistributedTensor)
@@ -676,6 +676,8 @@ class FullyShardedDataParallel(nn.Module):
         sync_module_states: bool = False,
         forward_prefetch: bool = False,
     ):
+        assert process_group is not None
+        assert process_group.size() == 4
         if isinstance(auto_wrap_policy, ParamExecOrderWrapPolicy):
             self._init_param_exec_order_wrap_policy(
                 module=module,
@@ -2120,6 +2122,8 @@ class FullyShardedDataParallel(nn.Module):
             self._state_dict_type == StateDictType.LOCAL_STATE_DICT or
             self._state_dict_type == StateDictType.SHARDED_STATE_DICT
         ):
+            # print(f" ::: {self._fsdp_wrapped_module.flat_param}")
+            # print(f" :xx:: {self._fsdp_wrapped_module.flat_param._is_sharded}")
             if (
                 self._fsdp_wrapped_module.flat_param is not None and
                 not self._fsdp_wrapped_module.flat_param._is_sharded
@@ -2252,6 +2256,10 @@ class FullyShardedDataParallel(nn.Module):
 
             # All-gather the param (ShardedTensor)
             shards = param.local_shards()
+            if len(shards) == 1 and isinstance(shards[0].tensor, ShardedTensor):
+                # print(f"{dist.get_rank()} >>> LOADING nested sharded tensor, unnesting")
+                param = shards[0].tensor
+                shards = param.local_shards()
             local_tensor = cast(torch.Tensor, shards[0].tensor).flatten()
             dim_0_size = param.size()[0]
             param_numel = param.size().numel()

@@ -1,3 +1,4 @@
+import functools
 import copy
 import contextlib
 from itertools import accumulate, chain
@@ -29,12 +30,11 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.distributed._shard.sharded_tensor.api import ShardedTensor
 try:
-    from spmd.tensor import Tensor as DistributedTensor, DeviceMesh
+    from spmd.tensor import DTensor as DistributedTensor, DeviceMesh
     from spmd.tensor.placement_types import Placement
     has_dt = True
 except ImportError:
     has_dt = False
-
 
 
 __all__ = [
@@ -297,7 +297,8 @@ class FlatParamHandle:
                                 param.placements,
                             )
                         )
-                        param = param.local_tensor()
+                        param._local_tensor.requires_grad_()
+                        param = param._local_tensor
                     else:
                         st_sharding_infos.append(None)
                     dtype = param.dtype
@@ -610,6 +611,10 @@ class FlatParamHandle:
 
     @staticmethod
     def _to_sharded_tensor(tensor: torch.Tensor, sharding_info: STShardingInfo):
+        def _dt_gradient_hook(param, grad):
+            param.grad = grad
+            param._local_tensor.grad = grad._local_tensor
+
         if sharding_info.sharding_spec is not None:
             sharded_tensor = ShardedTensor._init_from_local_tensor(
                 tensor,
@@ -626,7 +631,10 @@ class FlatParamHandle:
                 tensor,
                 device_mesh=sharding_info.device_mesh,
                 placements=sharding_info.placements,
+                run_check=False,
             )
+            if sharded_tensor.requires_grad:
+                sharded_tensor.register_hook(functools.partial(_dt_gradient_hook, sharded_tensor))
         else:
             raise ValueError("Invalid cases in _to_sharded_tensor")
         sharded_tensor._flattened = True
