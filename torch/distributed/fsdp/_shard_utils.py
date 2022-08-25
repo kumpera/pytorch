@@ -242,7 +242,6 @@ def create_shard_md_from_dt(dt: "DistributedTensor", current_rank) -> ShardMetad
     mesh = dt.device_mesh
     assert mesh.ndim == 1, f"Only 1D DeviceMeshes currently handled"
 
-    # print(f"{dist.get_rank()} -> {get_local_box(dt)}")
     offsets, sizes = get_local_box(dt)
     return ShardMetadata(
         shard_offsets=list(offsets),
@@ -265,8 +264,6 @@ def create_sharded_tensor_md_from_dt(dt: "DistributedTensor", dt_pg) -> ShardedT
 
     for i in range(shard_count):
         offsets, sizes = get_box_for(dt, i)
-        # if dist.get_rank() == 0:
-        #     print(f">> {i} => {offsets} / {sizes}")
         shards_md.append(ShardMetadata(
             shard_offsets=list(offsets),
             shard_sizes=list(sizes),

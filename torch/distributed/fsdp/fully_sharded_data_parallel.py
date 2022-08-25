@@ -676,8 +676,6 @@ class FullyShardedDataParallel(nn.Module):
         sync_module_states: bool = False,
         forward_prefetch: bool = False,
     ):
-        assert process_group is not None
-        assert process_group.size() == 4
         if isinstance(auto_wrap_policy, ParamExecOrderWrapPolicy):
             self._init_param_exec_order_wrap_policy(
                 module=module,
@@ -2257,10 +2255,13 @@ class FullyShardedDataParallel(nn.Module):
             # All-gather the param (ShardedTensor)
             shards = param.local_shards()
             if len(shards) == 1 and isinstance(shards[0].tensor, ShardedTensor):
-                # print(f"{dist.get_rank()} >>> LOADING nested sharded tensor, unnesting")
                 param = shards[0].tensor
                 shards = param.local_shards()
-            local_tensor = cast(torch.Tensor, shards[0].tensor).flatten()
+
+            if len(shards) == 0:
+                local_tensor = torch.tensor([], dtype=param.dtype, device=self.compute_device)
+            else:
+                local_tensor = cast(torch.Tensor, shards[0].tensor).flatten()
             dim_0_size = param.size()[0]
             param_numel = param.size().numel()
             chunk_size = (
