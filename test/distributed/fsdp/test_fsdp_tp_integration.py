@@ -1,17 +1,21 @@
 # Owner(s): ["oncall: distributed"]
-
+import copy
 import sys
-from typing import Any, NamedTuple, Optional, Tuple
+from typing import Any, List, NamedTuple, Optional, Tuple
 
 import torch
 import torch.distributed._shard.sharding_spec as shard_spec
 from torch import distributed as dist
+from torch.distributed.remote_device import _remote_device
 from torch.distributed._shard import shard_module
 from torch.distributed._shard.sharded_optim import (
     named_params_with_sharded_tensor,
     ShardedOptimizer,
 )
-from torch.distributed._shard.sharded_tensor.api import ShardedTensor
+from torch.distributed._shard.sharded_tensor.api import (
+    Shard,
+    ShardedTensor,
+)
 from torch.distributed._shard.sharding_plan import ShardingPlan
 from torch.distributed._shard.sharding_spec import ChunkShardingSpec
 from torch.distributed.fsdp._tensor_flattener import (
@@ -19,9 +23,11 @@ from torch.distributed.fsdp._tensor_flattener import (
     TensorFlattener,
 )
 from torch.distributed.fsdp._utils import _set_fsdp_flattened
+from torch.distributed.fsdp._shard_utils import _create_chunk_sharded_tensor
 from torch.distributed.fsdp.fully_sharded_data_parallel import (
     CPUOffload,
     FullyShardedDataParallel as FSDP,
+    StateDictType,
 )
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_fsdp import FSDPTest
@@ -80,7 +86,11 @@ class ShardedTensorFlattener(TensorFlattener):
     ) -> torch.Tensor:
         sharded_tensor = ShardedTensor._init_from_local_tensor(
             tensor,
-            sharding_info.sharding_spec,
+            _rewrite_spec_if_needed(
+                sharding_info.sharding_spec,
+                tensor,
+                dist.get_rank(sharding_info.process_group)
+            ),
             sharding_info.global_size,
             process_group=sharding_info.process_group,
         )
@@ -88,12 +98,90 @@ class ShardedTensorFlattener(TensorFlattener):
         return sharded_tensor
 
 
+    def chunk_tensor(
+        self,
+        tensor: torch.Tensor,
+        rank: int,
+        world_size: int,
+        num_devices_per_node: int,
+        pg: dist.ProcessGroup,
+    ) -> torch.Tensor:
+        if type(tensor) is ShardedTensor:
+            assert len(tensor.local_shards()) == 1
+
+            inner_param = tensor.local_tensor()
+            inner_st = _create_chunk_sharded_tensor(
+                inner_param,
+                rank,
+                world_size,
+                num_devices_per_node,
+                pg,
+            )
+
+            outer_local_shard = tensor.local_shards()[0]
+            shards: List[Shard] = [
+                Shard(inner_st, copy.deepcopy(outer_local_shard.metadata))
+            ]
+            st_meta = copy.deepcopy(tensor.metadata())
+            st_meta.tensor_properties.requires_grad = False
+
+            st_outer = ShardedTensor._init_from_local_shards_and_global_metadata(
+                shards,
+                sharded_tensor_metadata=st_meta,
+                process_group=tensor._process_group,
+                init_rrefs=False
+            )
+            return st_outer
+        else:
+            return _create_chunk_sharded_tensor(
+                tensor,
+                rank,
+                world_size,
+                num_devices_per_node,
+                pg
+            )
+
+    def pre_load_state_dict_transform(
+        self,
+        tensor: torch.Tensor,
+    ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        shards = tensor.local_shards()
+        # default impl removes this line
+        if len(shards) == 1 and type(shards[0].tensor) is ShardedTensor:
+            tensor = shards[0].tensor
+            shards = tensor.local_shards()
+
+        return (tensor, [shards[0].tensor] if len(shards) > 0 else [])
+
 _set_tensor_flattener(ShardedTensorFlattener())
 
+def _rewrite_spec_if_needed(spec: shard_spec.ShardingSpec, tensor: torch.Tensor, rank: int):
+    """
+    Rewrite ``spec`` to match the device of ``tensor``.
+
+    FSDP.sharded_optim_state_dict sneakly ships optimizer state to CPU so if the original ShardingSpec
+    produces CUDA metadata, ST construction bombs.
+    """
+    if not isinstance(spec, ChunkShardingSpec):
+        return spec
+
+    # let's see if we need
+    rewrite = False
+    for p in spec.placements:
+        if p.rank() == rank and p.device() != tensor.device:
+            rewrite = True
+            break
+    if rewrite:
+        spec = copy.deepcopy(spec)
+        for i, placement in enumerate(spec.placements):
+            if placement.rank() == rank and placement.device() != tensor.device:
+                spec.placements[i] = _remote_device(f"rank:{rank}/{tensor.device}")
+
+    return spec
 
 def _generate_chunk_sharding_spec(world_size, tp_pg):
     placements = [
-        f"rank:{idx}/cuda:{dist.distributed_c10d._get_global_rank(tp_pg, idx) % torch.cuda.device_count()}"
+        f"rank:{idx}/cuda:{dist.distributed_c10d.get_global_rank(tp_pg, idx) % torch.cuda.device_count()}"
         for idx in range(world_size)
     ]
     colwise_spec = ChunkShardingSpec(
@@ -106,6 +194,13 @@ def _generate_chunk_sharding_spec(world_size, tp_pg):
     )
     return colwise_spec, rowwise_spec
 
+def _is_nested_tensor(val: Any) -> bool:
+    if type(val) is ShardedTensor:
+        if len(val.local_shards()) == 0:
+            return False
+        if type(val.local_shards()[0].tensor) is ShardedTensor:
+            return True
+    return False
 
 def _module_sharding_plan(specs):
     colwise_spec, rowwise_spec = specs[0], specs[1]
@@ -319,6 +414,47 @@ class TestTpFsdpIntegration(FSDPTest):
         output = model(input)
         output_tp = model_tp(input)
         self.assertEqual(output, output_tp)
+
+    @skip_if_lt_x_gpu(4)
+    def test_fsdp_tp_checkpoint_integration(self):
+        """Test FSDP with TP Integration."""
+        inp_size = [2, 3, 5]
+        model_parallel_size = 2
+        # Use same seed so that each rank get the same model params.
+        torch.manual_seed(0)
+        model_tp = SimpleModel().cuda(self.rank)
+        # Generate sub-process group for TP and FSDP.
+        tp_pg, fsdp_pg = self._generate_sub_pg(model_parallel_size)
+
+        # Wrap the control group model with FSDP only.
+        sharding_specs = _generate_chunk_sharding_spec(tp_pg.size(), tp_pg)
+        # Shard the module first and then wrap with FSDP.
+        sharding_plan = _module_sharding_plan(sharding_specs)
+        shard_module(model_tp, sharding_plan, process_group=tp_pg)
+        model_tp = FSDP(model_tp, process_group=fsdp_pg)
+
+        # check we produce a nested ST
+        with FSDP.state_dict_type(model_tp, StateDictType.SHARDED_STATE_DICT):
+            state_dict = model_tp.state_dict()
+            # TODO once 2D is out, validate the nesting
+            self.assertTrue(_is_nested_tensor(state_dict["net1.weight"]))
+            self.assertFalse(_is_nested_tensor(state_dict["net1.bias"]))
+
+        optim_input = list(model_tp.parameters())
+        optim = torch.optim.Adam(optim_input, lr=0.0001)
+
+        # Create Input
+        input_seed = self.rank
+        torch.manual_seed(input_seed + 1)
+        input = torch.rand(*inp_size).cuda(self.rank)
+
+        model_tp(input).sum().backward()
+        optim.step()
+
+        optim_state = FSDP.sharded_optim_state_dict(model_tp, optim, optim_input)
+        # TODO once 2D is out, validate the nesting
+        self.assertTrue(_is_nested_tensor(optim_state["state"]["net1.weight"]["exp_avg"]))
+        self.assertFalse(_is_nested_tensor(optim_state["state"]["net1.bias"]["exp_avg"]))
 
 
 instantiate_parametrized_tests(TestTpFsdpIntegration)
