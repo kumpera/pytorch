@@ -4,6 +4,13 @@
 #include <torch/csrc/distributed/c10d/Types.hpp>
 #include <torch/library.h>
 
+namespace torch {
+namespace distributed {
+namespace c10d {
+c10::IValue pg_to_pybind_obj(const c10::intrusive_ptr<::c10d::ProcessGroup>& pg);
+} } }
+
+
 namespace c10d {
 namespace {
 
@@ -163,7 +170,13 @@ TORCH_LIBRARY(c10d, m) {
   // The following ProcessGroup, Work, and ReduceOp definitions are more like
   // declarations. They don't expose the details of the two classes into
   // TorchScript.
+
   m.class_<ProcessGroup>("ProcessGroup").def(torch::init<int64_t, int64_t>());
+
+  m.def(
+    "pg_to_pybind_obj",
+    [](const c10::intrusive_ptr<ProcessGroup>& pg) { return torch::distributed::c10d::pg_to_pybind_obj(pg); });
+
   m.class_<Work>("Work")
       .def(torch::init<>())
       .def("wait", [](const c10::intrusive_ptr<Work>& self) { self->wait(); });

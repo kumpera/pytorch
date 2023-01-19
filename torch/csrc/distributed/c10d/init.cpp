@@ -104,6 +104,11 @@ namespace torch {
 namespace distributed {
 namespace c10d {
 
+::c10::IValue pg_to_pybind_obj(const c10::intrusive_ptr<::c10d::ProcessGroup>& pg) {
+    py::object obj = py::cast(pg);
+    return jit::toIValue(obj, PyObjectType::get());
+}
+
 namespace {
 
 std::vector<std::string> split(char separator, const std::string& string) {
