@@ -3554,7 +3554,6 @@ def new_subgroups(
     timeout=default_pg_timeout,
     backend=None,
     pg_options=None,
-    pg_tag=None,
 ):
     """
     Creates GPU subgroups of equal size. By default, it creates intra-machine subgroups,
@@ -3663,7 +3662,6 @@ def new_subgroups(
             timeout=timeout,
             backend=backend,
             pg_options=pg_options,
-            pg_tag=pg_tag,
         )
         subgroups.append(subgroup)
 
