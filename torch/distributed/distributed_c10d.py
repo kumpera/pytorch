@@ -1091,13 +1091,14 @@ def _new_process_group_helper(
     _world.pg_names[pg] = group_name
     # FIXME this should be moved to _World
     _pg_backend_map[pg] = str(backend_config)
+
     # "" is the default tag for user PGs
     if pg_tag in [None, ""]:
         pg_tag = f"ptd:{group_name}"
+        _world.tags_to_pg.setdefault("", []).append(pg)
     else:
         pg_tag = f"user:{pg_tag}"
 
-    pg_tag = pg_tag or ""
     _world.tags_to_pg.setdefault(pg_tag, []).append(pg)
     _world.pg_to_tag[pg] = pg_tag
     return pg
@@ -3485,8 +3486,6 @@ def _new_group_with_tag(ranks=None, timeout=default_pg_timeout, backend=None, pg
     :: N.B. The mechanism is experimental and tied to the functional collectives effort, see
     ``torch.distributed._functional_collectives`` for reference on how to use it.
     """
-
-
     global _world
 
     default_pg = _get_default_group()
@@ -3797,7 +3796,7 @@ def new_subgroups_by_enumeration(
 
 
 def _try_find_pg_by_ranks_and_tag(tag: str, ranks: List[int]) -> ProcessGroup:
-    if not tag.startswith("ptd:") and not tag.startswith("user:"):
+    if len(tag) > 0 and not tag.startswith("ptd:") and not tag.startswith("user:"):
         tag = f"user:{tag}"
 
     for group in _world.tags_to_pg.get(tag, []):
@@ -3829,7 +3828,7 @@ def _find_or_create_pg_by_ranks_and_tag(tag: str, ranks: List[int], stride: int)
     if pg is not None:
         return pg
     if tag == "":
-        raise ValueError("Cannot automatially create PG with empty tag")
+        raise ValueError("Cannot automatically create PG with empty tag")
     # TODO copy settings and timeout from default PG
     return _new_group_with_tag(my_ranks, pg_tag=tag)
 
