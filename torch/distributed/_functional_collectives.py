@@ -25,6 +25,30 @@ Issues:
 * Proper support for eager requires inplace ops. We should explore having it as an option for the API.
 """
 
+"""
+How about the following schema: (in chat with Alban) 
+1) inside the op I collect a (data_ptr, witness_callback) tuple and return the tensor that holds data_ptr; 
+2)whenever I witness a tensor I use its data_ptr to lookup among the tuples from (1); and
+ 3)I use a weakref on the custom tensor subclass that wraps the tensor from (1) to ensure cleanup
+"""
+
+data_ptr_to_work = dict()
+
+def _register_tensor_inner(tensor, work):
+    print(f"Hello, I'm {dist.get_rank()}, may I register [{id(tensor)}]::{tensor.data_ptr()} pointing to {work} ¿PRETTY PLEASE?")
+    global data_ptr_to_work
+    data_ptr_to_work[tensor.data_ptr()] = work
+
+def _register_tensor_wrapper_inner(tensor):
+    print(f"Hey, it's {dist.get_rank()} and I got a wrapper, won't touch it cuz it's fragile")
+
+def _wait_tensor_inner(tensor):
+    global data_ptr_to_work
+    thework = data_ptr_to_work.get(tensor.data_ptr())
+    print(f"It's me {dist.get_rank()} and I'm back to wait on [{id(tensor)}]::{tensor.data_ptr()}. Is this tensor a good boy? {thework is not None}")
+    if thework is not None:
+        thework.wait()
+        del data_ptr_to_work[tensor.data_ptr()]
 
 # FIXME for this to work correctly we need to change Work to internally hold no reference to the tensor.
 # tensor_to_work = WeakIdKeyDictionary()
@@ -38,7 +62,8 @@ impl_lib_cpu = torch.library.Library("tr_c10d", "IMPL", "CPU")
 impl_lib_cuda = torch.library.Library("tr_c10d", "IMPL", "CUDA")
 
 def _wait_tensor(tensor: torch.Tensor):
-    _wait_registered_tensor(tensor)
+    _wait_tensor_inner(tensor)
+    # _wait_registered_tensor(tensor)
     # w = tensor_to_work.get(tensor)
     # print(f"{dist.get_rank()} waiting on {tensor} /({id(tensor)}/{tensor.data_ptr()}) -> found: {w is not None}")
     # if w:
@@ -115,9 +140,10 @@ def _all_reduce(self, reduceOp, tag, ranks, stride):
     # global tensor_to_work
     # global stash_of_stupid_tensors
     # tensor_to_work[inplace_tensor] = work
-    _register_work_tensor(inplace_tensor, work)
+    # _register_work_tensor(inplace_tensor, work)
     # stash_of_stupid_tensors.add(inplace_tensor)
     # stash_of_stupid_tensors.add(self)
+    _register_tensor_inner(inplace_tensor, work)
     print(f"{dist.get_rank()} adding {id(inplace_tensor)}/{inplace_tensor.data_ptr()} self was:{id(self)}/{self.data_ptr()} in-rc:{inp_rc_old} -> {sys.getrefcount(inplace_tensor)} self-rc: {self_rc_old} -> {sys.getrefcount(self)}")
     # print(f"{dist.get_rank()} adding {id(inplace_tensor)}/{inplace_tensor.data_ptr()} self was:{id(self)}/{self.data_ptr()} res-in:{inplace_tensor in stash_of_stupid_tensors} self-in:{self in stash_of_stupid_tensors} in-rc:{inp_rc_old} -> {sys.getrefcount(inplace_tensor)} self-rc: {self_rc_old} -> {sys.getrefcount(self)}")
     return inplace_tensor
@@ -194,6 +220,7 @@ def all_reduce(self: torch.Tensor, reduceOp: str, group: RANK_TYPES, tag: str = 
     print(f"I'm {dist.get_rank()} rankset:{rankset} stride:{stride} tag:{tag} got tensor {id(tensor)}/{tensor.data_ptr()} self: {id(self)}/{self.data_ptr()}")
     # print(f"I'm {dist.get_rank()} rankset:{rankset} stride:{stride} tag:{tag} got tensor {id(tensor)}/{tensor.data_ptr()} self: {id(self)}/{self.data_ptr()} t-in:{tensor in stash_of_stupid_tensors} s-in: {self in stash_of_stupid_tensors} T-RC:{sys.getrefcount(tensor)} S-RC{sys.getrefcount(self)}")
     res = AsyncCollectiveTensor(tensor)
+    _register_tensor_wrapper_inner(res)
 
     # if tensor in stash_of_stupid_tensors:
     #     print(f">> {dist.get_rank()} removing {id(tensor)} from stash")
