@@ -3825,6 +3825,10 @@ def _find_or_create_pg_by_ranks_and_tag(tag: str, ranks: List[int], stride: int)
     my_ranks.sort()
 
     pg = _try_find_pg_by_ranks_and_tag(tag, my_ranks)
+    pgstr = "None"
+    if pg:
+        pgstr = get_process_group_ranks(pg)
+    print(f">>>{get_rank()} looking for {my_ranks} got pg: {pg} /{pgstr}")
     if pg is not None:
         return pg
     if tag == "":

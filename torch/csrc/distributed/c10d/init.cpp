@@ -226,6 +226,26 @@ void _register_builtin_comm_hook(
   reducer.register_builtin_comm_hook(comm_hook_type);
 }
 
+class WeakTensorRef {
+  c10::weak_intrusive_ptr<c10::TensorImpl> weakref_;
+
+ public:
+  WeakTensorRef(const at::Tensor& t) : weakref_(t.getIntrusivePtr()) {}
+
+  bool expired() {
+    return weakref_.expired();
+  }
+};
+
+void _register_work_tensor(const at::Tensor& tensor, c10::intrusive_ptr<::c10d::Work> work) {
+    printf("REGISTERING TENSOR %p\n", (void*)tensor.data_ptr());
+}
+
+
+void _wait_registered_tensor(const at::Tensor& tensor) {
+    printf("WAITING TENSOR %p\n", (void*)tensor.data_ptr());
+    
+}
 // Customize the metaclass of ::c10d::ReduceOp for the backward compatibility.
 // https://github.com/pytorch/pytorch/pull/84243 changed ::c10d::ReduceOp to
 // struct from enum, sacrificing some of the Python built-in function supports
@@ -301,6 +321,12 @@ PyObject* c10d_init(PyObject* _unused, PyObject* noargs) {
   auto module = py::handle(m).cast<py::module>();
 
   module
+      .def(
+        "_register_work_tensor",
+        &_register_work_tensor)
+      .def(
+        "_wait_registered_tensor",
+        &_wait_registered_tensor)
       .def(
           "_register_comm_hook",
           &_register_comm_hook,

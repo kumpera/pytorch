@@ -1,3 +1,4 @@
+import sys
 from typing import Any, Tuple, Union, List, cast
 
 import torch
@@ -8,7 +9,10 @@ from torch._C import _disabled_torch_function_impl
 from torch.utils._pytree import tree_map
 
 import torch.distributed.distributed_c10d as c10d
-
+from torch._C._distributed_c10d import (
+    _register_work_tensor,
+    _wait_registered_tensor
+)
 """
 New traceable, functional collectives.
   compiler: trace these ops with plain-old-data schemas, then choose how to lower them.
@@ -23,7 +27,9 @@ Issues:
 
 
 # FIXME for this to work correctly we need to change Work to internally hold no reference to the tensor.
-tensor_to_work = WeakIdKeyDictionary()
+# tensor_to_work = WeakIdKeyDictionary()
+# I WONT EXPLAIN WHY X-BOUNDARY IDENTITY IS MADENING COMPLICATED <AAAA, AAAA>
+# stash_of_stupid_tensors = set()
 
 lib = torch.library.Library("tr_c10d", "DEF")
 lib.define("wait(Tensor self) -> Tensor")
@@ -32,10 +38,12 @@ impl_lib_cpu = torch.library.Library("tr_c10d", "IMPL", "CPU")
 impl_lib_cuda = torch.library.Library("tr_c10d", "IMPL", "CUDA")
 
 def _wait_tensor(tensor: torch.Tensor):
-    w = tensor_to_work.get(tensor)
-    if w:
-        del tensor_to_work[tensor]
-        w.wait()
+    _wait_registered_tensor(tensor)
+    # w = tensor_to_work.get(tensor)
+    # print(f"{dist.get_rank()} waiting on {tensor} /({id(tensor)}/{tensor.data_ptr()}) -> found: {w is not None}")
+    # if w:
+    #     del tensor_to_work[tensor]
+    #     w.wait()
     return tensor
 
 impl_lib_cpu.impl("wait", _wait_tensor)
@@ -66,6 +74,7 @@ class AsyncCollectiveTensor(torch.Tensor):
         t = tensor
         r = torch.Tensor._make_subclass(cls, t, require_grad=t.requires_grad)
         r._tensor = tensor  # type: ignore[attr-defined]
+        print(f">> {dist.get_rank()} ctor op {id(tensor)}")
         return r
 
     def __repr__(self):
@@ -75,6 +84,7 @@ class AsyncCollectiveTensor(torch.Tensor):
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         def unwrap(e: Any):
             if isinstance(e, AsyncCollectiveTensor):
+                print(f">> {dist.get_rank()} calling wait op on {id(e._tensor)}")
                 return wait_tensor(e._tensor)
             return e
 
@@ -99,9 +109,17 @@ def _all_reduce(self, reduceOp, tag, ranks, stride):
 
     inplace_tensor = self.clone()
     work = dist.all_reduce(inplace_tensor, op=op, group=group, async_op=True)
+    inp_rc_old = sys.getrefcount(inplace_tensor)
+    self_rc_old = sys.getrefcount(self)
 
-    global tensor_to_work
-    tensor_to_work[inplace_tensor] = work
+    # global tensor_to_work
+    # global stash_of_stupid_tensors
+    # tensor_to_work[inplace_tensor] = work
+    _register_work_tensor(inplace_tensor, work)
+    # stash_of_stupid_tensors.add(inplace_tensor)
+    # stash_of_stupid_tensors.add(self)
+    print(f"{dist.get_rank()} adding {id(inplace_tensor)}/{inplace_tensor.data_ptr()} self was:{id(self)}/{self.data_ptr()} in-rc:{inp_rc_old} -> {sys.getrefcount(inplace_tensor)} self-rc: {self_rc_old} -> {sys.getrefcount(self)}")
+    # print(f"{dist.get_rank()} adding {id(inplace_tensor)}/{inplace_tensor.data_ptr()} self was:{id(self)}/{self.data_ptr()} res-in:{inplace_tensor in stash_of_stupid_tensors} self-in:{self in stash_of_stupid_tensors} in-rc:{inp_rc_old} -> {sys.getrefcount(inplace_tensor)} self-rc: {self_rc_old} -> {sys.getrefcount(self)}")
     return inplace_tensor
 
 c10_lib_cpu = torch.library.Library("aten", "IMPL", "CPU")
@@ -171,5 +189,17 @@ def all_reduce(self: torch.Tensor, reduceOp: str, group: RANK_TYPES, tag: str = 
     that information and perform collective algebraic optimization. Use other forms of input for that.
     """
     tag, rankset, stride = _expand_group(group, tag)
+    # global stash_of_stupid_tensors
     tensor = torch._C._nn.all_reduce(self, reduceOp, tag, rankset, stride)  # type: ignore[attr-defined]
-    return AsyncCollectiveTensor(tensor)
+    print(f"I'm {dist.get_rank()} rankset:{rankset} stride:{stride} tag:{tag} got tensor {id(tensor)}/{tensor.data_ptr()} self: {id(self)}/{self.data_ptr()}")
+    # print(f"I'm {dist.get_rank()} rankset:{rankset} stride:{stride} tag:{tag} got tensor {id(tensor)}/{tensor.data_ptr()} self: {id(self)}/{self.data_ptr()} t-in:{tensor in stash_of_stupid_tensors} s-in: {self in stash_of_stupid_tensors} T-RC:{sys.getrefcount(tensor)} S-RC{sys.getrefcount(self)}")
+    res = AsyncCollectiveTensor(tensor)
+
+    # if tensor in stash_of_stupid_tensors:
+    #     print(f">> {dist.get_rank()} removing {id(tensor)} from stash")
+    #     stash_of_stupid_tensors.remove(tensor)
+    # else:
+    #     stash_str = ",".join(str(id(x)) for x in stash_of_stupid_tensors)
+    #     print(f">> {dist.get_rank()} tensor {id(tensor)} NOT ON stash {len(stash_of_stupid_tensors)} -- {stash_str}")
+
+    return res
