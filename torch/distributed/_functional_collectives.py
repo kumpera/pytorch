@@ -158,6 +158,28 @@ def _all_reduce(self, reduceOp, tag, ranks, stride):
 
     return inplace_tensor
 
+def _all_gather(self, tag, ranks, stride):
+    group = c10d._find_or_create_pg_by_ranks_and_tag(tag, ranks, stride)
+    assert group is not None
+
+    size = list(self.size())
+    size[0] *= group.size()
+
+    inplace_tensor = torch.empty(
+        size,
+        dtype=self.dtpye,
+        layout=self.layout,
+        device=self.device,
+        pin_memory=self.pin_memory,
+        memory_format=torch.preserve_format,
+        # FIXME should we copy requires_grad?
+    )
+
+    work = dist.all_gather_into_tensor(inplace_tensor, self, group=group, async_op=True)
+    _register_tensor_inner(inplace_tensor, work)
+
+    return inplace_tensor
+
 def _gather_src_rank(self, dst, tag, ranks, stride):
     group = c10d._find_or_create_pg_by_ranks_and_tag(tag, ranks, stride)
     assert group is not None
@@ -175,7 +197,7 @@ def _gather_dst_rank(self, dst, tag, ranks, stride):
 
     work = dist.gather(self, gather_list=tensor_list, dst=dst, group=group, async_op=True)
     for t in tensor_list:
-      _register_tensor_inner(t, work)  
+        _register_tensor_inner(t, work)
     return tensor_list
 
 c10_lib_cpu = torch.library.Library("aten", "IMPL", "CPU")
@@ -184,8 +206,12 @@ c10_lib_cuda = torch.library.Library("aten", "IMPL", "CUDA")
 c10_lib_cpu.impl("all_reduce", _all_reduce)
 c10_lib_cuda.impl("all_reduce", _all_reduce)
 
+c10_lib_cpu.impl("all_gather", _all_gather)
+c10_lib_cuda.impl("all_gather", _all_gather)
+
 c10_lib_cpu.impl("gather_src_rank", _gather_src_rank)
 c10_lib_cuda.impl("gather_src_rank", _gather_src_rank)
+
 c10_lib_cpu.impl("gather_dst_rank", _gather_dst_rank)
 c10_lib_cuda.impl("gather_dst_rank", _gather_dst_rank)
 
@@ -255,32 +281,11 @@ def all_reduce(self: torch.Tensor, reduceOp: str, group: RANK_TYPES, tag: str = 
     _register_tensor_wrapper_inner(res, tensor)
     return res
 
-def all_reduce(self: torch.Tensor, reduceOp: str, group: RANK_TYPES, tag: str = ""):
-    """
-    Reduces the tensor data across all machines in such a way that all get
-    the final result.
-
-    The input tensor is left unmodified.
-
-    Group can be one of:
-        List[int]: ranks participating in the collective.
-        List[List[int]]: 2D mesh of ranks taking part of this collective in MPMD.
-        ProcessGroup: Will perform a collective using the ranks and tag of the PG.
-        DeviceMesh: Do a SPMD collective over all ranks of the mesh
-        (DeviceMesh, int): Do a MPMD collective over one dimension of the DeviceMesh
-
-    :: N.B. If you pass a PG or a 1D list to perform a MPMD collective, the compiler won't be able to recover
-    that information and perform collective algebraic optimization. Use other forms of input for that.
-    """
-    tag, rankset, stride = _expand_group(group, tag)
-    tensor = torch._C._nn.all_reduce(self, reduceOp, tag, rankset, stride)  # type: ignore[attr-defined]
-    res = AsyncCollectiveTensor(tensor)
-    _register_tensor_wrapper_inner(res, tensor)
-    return res
-
 def gather(self: torch.Tensor, dst: int, group: RANK_TYPES, tag: str = "") -> Union[List[torch.Tensor], torch.Tensor]:
     """
-    N.B. when calling from a rank different than ``dst`` the returned tensor is a dummy that can be used to trigger a synchronization point. For example:
+
+    N.B. when calling from a rank different than ``dst`` the returned tensor
+    is a dummy that can be used to trigger a synchronization point. For example:
 
     ```
         import torch
@@ -296,21 +301,18 @@ def gather(self: torch.Tensor, dst: int, group: RANK_TYPES, tag: str = "") -> Un
             assert isinstance(res, torch.Tensor)
             ...
             res.clone() # will introduce x-stream sync here
-        
+
     N.B. Maybe we should change the API to always return a list of tensors?
-
     ```
-    
     """
-
     tag, rankset, stride = _expand_group(group, tag)
     if dist.get_rank() == dst:
         tensors = torch._C._nn.gather_dst_rank(self, dst, tag, rankset, stride)  # type: ignore[attr-defined]
-        res_l= []
+        res_l = []
         for t in tensors:
             res = AsyncCollectiveTensor(t)
             _register_tensor_wrapper_inner(res, t)
-            res_l.add(res)
+            res_l.append(cast(torch.Tensor, res))
         return res_l
     else:
         tensor = torch._C._nn.gather_src_rank(self, dst, tag, rankset, stride)  # type: ignore[attr-defined]
@@ -319,4 +321,9 @@ def gather(self: torch.Tensor, dst: int, group: RANK_TYPES, tag: str = "") -> Un
         return res
 
 
-
+def all_gather(self: torch.Tensor, group: RANK_TYPES, tag: str = "") -> torch.Tensor:
+    tag, rankset, stride = _expand_group(group, tag)
+    tensor = torch._C._nn.all_gather(self, tag, rankset, stride)  # type: ignore[attr-defined]
+    res = AsyncCollectiveTensor(tensor)
+    _register_tensor_wrapper_inner(res, tensor)
+    return res

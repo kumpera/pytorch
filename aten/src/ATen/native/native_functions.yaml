@@ -14626,3 +14626,9 @@
   dispatch:
     CompositeExplicitAutograd: gather_dst_rank
   variants: function
+
+- func: all_gather(Tensor self, str tag, int[] ranks, int stride) -> Tensor
+  python_module: nn
+  dispatch:
+    CompositeExplicitAutograd: all_gather
+  variants: function
