@@ -14632,3 +14632,9 @@
   dispatch:
     CompositeExplicitAutograd: all_gather
   variants: function
+
+- func: reduce_scatter(Tensor self, str tag, int[] ranks, int stride) -> Tensor
+  python_module: nn
+  dispatch:
+    CompositeExplicitAutograd: reduce_scatter
+  variants: function

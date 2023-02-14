@@ -180,6 +180,29 @@ def _all_gather(self, tag, ranks, stride):
 
     return inplace_tensor
 
+def _reduce_gather(self, tag, ranks, stride):
+    group = c10d._find_or_create_pg_by_ranks_and_tag(tag, ranks, stride)
+    assert group is not None
+    assert self.size(0) % group.size() == 0
+
+    size = list(self.size())
+    size[0] /= group.size()
+
+    inplace_tensor = torch.empty(
+        size,
+        dtype=self.dtpye,
+        layout=self.layout,
+        device=self.device,
+        pin_memory=self.pin_memory,
+        memory_format=torch.preserve_format,
+        # FIXME should we copy requires_grad?
+    )
+
+    work = dist.all_gather_into_tensor(inplace_tensor, self, group=group, async_op=True)
+    _register_tensor_inner(inplace_tensor, work)
+
+    return inplace_tensor
+
 def _gather_src_rank(self, dst, tag, ranks, stride):
     group = c10d._find_or_create_pg_by_ranks_and_tag(tag, ranks, stride)
     assert group is not None
@@ -324,6 +347,13 @@ def gather(self: torch.Tensor, dst: int, group: RANK_TYPES, tag: str = "") -> Un
 def all_gather(self: torch.Tensor, group: RANK_TYPES, tag: str = "") -> torch.Tensor:
     tag, rankset, stride = _expand_group(group, tag)
     tensor = torch._C._nn.all_gather(self, tag, rankset, stride)  # type: ignore[attr-defined]
+    res = AsyncCollectiveTensor(tensor)
+    _register_tensor_wrapper_inner(res, tensor)
+    return res
+
+def reduce_scatter(self: torch.Tensor, group: RANK_TYPES, tag: str = "") -> torch.Tensor:
+    tag, rankset, stride = _expand_group(group, tag)
+    tensor = torch._C._nn.reduce_scatter(self, tag, rankset, stride)  # type: ignore[attr-defined]
     res = AsyncCollectiveTensor(tensor)
     _register_tensor_wrapper_inner(res, tensor)
     return res

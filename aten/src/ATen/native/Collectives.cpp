@@ -37,5 +37,10 @@ at::Tensor all_gather(const at::Tensor& self, const c10::string_view tag, c10::A
     TORCH_INTERNAL_ASSERT(false);
 }
 
+at::Tensor reduce_scatter(const at::Tensor& self, const c10::string_view tag, c10::ArrayRef<int64_t> ranks, int64_t stride) {
+    // This should never get called
+    // Defer to python impls in torch/distributyed/_functional_collectives.py and _meta_registrations.py
+    TORCH_INTERNAL_ASSERT(false);
+}
 } // namespace native
 } // namespace at
