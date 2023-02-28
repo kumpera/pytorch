@@ -19,6 +19,11 @@ at::Tensor all_reduce(at::Tensor const& self, const c10::string_view reduceOp, c
     TORCH_INTERNAL_ASSERT(false);
 }
 
+at::Tensor reduce_scatter_into_tensor(at::Tensor const& self, const c10::string_view reduceOp, const c10::string_view tag, c10::ArrayRef<int64_t> ranks, int64_t group_size) {
+    // This should never get called
+    // Defer to python impls in torch/distributed/_functional_collectives.py and _meta_registrations.py
+    TORCH_INTERNAL_ASSERT(false);
+}
 at::Tensor wait_tensor(at::Tensor const& self) {
     // This should never get called
     // Defer to python impls in torch/distributed/_functional_collectives.py and _meta_registrations.py

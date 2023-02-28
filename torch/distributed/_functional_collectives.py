@@ -151,11 +151,28 @@ def _all_reduce(self, reduceOp, tag, ranks, group_size):
 
     return inplace_tensor
 
+def _reduce_scatter_into_tensor(self, reduceOp, tag, ranks, group_size):
+    op = _str_to_reduce_op(reduceOp)
+    group = c10d._find_or_create_pg_by_ranks_and_tag(tag, ranks, group_size)
+    assert group is not None
+
+    out_size = list(self.size())
+    out_size[0] /= group_size
+
+    inplace_tensor = self.new_empty(memory_format=torch.contiguous_format)
+    work = dist.reduce_scatter_tensor(inplace_tensor, op=op, group=group, async_op=True)
+    _register_tensor_work(inplace_tensor, work)
+
+    return inplace_tensor
+
 c10_lib_cpu = torch.library.Library("aten", "IMPL", "CPU")
 c10_lib_cuda = torch.library.Library("aten", "IMPL", "CUDA")
 
 c10_lib_cpu.impl("all_reduce", _all_reduce)
 c10_lib_cuda.impl("all_reduce", _all_reduce)
+
+c10_lib_cpu.impl("reduce_scatter_into_tensor", _reduce_scatter_into_tensor)
+c10_lib_cuda.impl("reduce_scatter_into_tensor", _reduce_scatter_into_tensor)
 
 c10_lib_cpu.impl("wait_tensor", _wait_tensor)
 c10_lib_cuda.impl("wait_tensor", _wait_tensor)
@@ -232,6 +249,31 @@ def all_reduce(self: torch.Tensor, reduceOp: str, group: RANK_TYPES, tag: str = 
     """
     tag, rankset, group_size = _expand_group(group, tag)
     tensor = torch._C._nn.all_reduce(self, reduceOp, tag, rankset, group_size)  # type: ignore[attr-defined]
+    res = AsyncCollectiveTensor(tensor)
+    _register_wrapper_tensor(res, tensor)
+    return res
+
+def reduce_scatter_into_tensor(self: torch.Tensor, reduceOp: str, group: RANK_TYPES, tag: str = ""):
+    """
+    Reduces the tensor data across all machines in such a way that all get
+    the final result.
+
+    The input tensor is left unmodified.
+
+    Group can be one of:
+        List[int]: ranks participating in the collective.
+        List[List[int]]: 2D mesh of ranks taking part of this collective in MPMD.
+        ProcessGroup: Will perform a collective using the ranks and tag of the PG.
+        DeviceMesh: Do a SPMD collective over all ranks of the mesh
+        (DeviceMesh, int): Do a MPMD collective over one dimension of the DeviceMesh
+
+    :: N.B. If you pass a PG or a 1D list to perform a MPMD collective, the compiler won't be able to recover
+    that information and perform collective algebraic optimization. Use other forms of input for that.
+    """
+    tag, rankset, group_size = _expand_group(group, tag)
+    assert self.size(0) % group_size == 0, \
+        f"input dimension 0 ({self.size(0)} must be a multiple of group_size {group_size}"
+    tensor = torch._C._nn.reduce_scatter_into_tensor(self, reduceOp, tag, rankset, group_size)  # type: ignore[attr-defined]
     res = AsyncCollectiveTensor(tensor)
     _register_wrapper_tensor(res, tensor)
     return res

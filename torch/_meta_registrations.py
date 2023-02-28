@@ -2721,6 +2721,12 @@ def all_reduce_meta(self, reduceOp, tag, rankset, stride):
     return torch.empty_like(self)
 
 
+@register_meta(aten.reduce_scatter_into_tensor)
+def all_reduce_meta(self, reduceOp, tag, rankset, group_size):
+    out_size = list(self.size())
+    out_size[0] /= group_size
+    return self.new_empty(out_size)
+
 @register_meta(aten.wait_tensor)
 def wait_tensor_meta(self):
     return torch.empty_like(self)
