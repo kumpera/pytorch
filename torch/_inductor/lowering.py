@@ -3889,9 +3889,7 @@ try:
 
     @register_lowering(aten.all_reduce)
     def allreduce(input, reduce_op, tag, ranks, group_size):
-        return TensorBox.create(
-            ir.AllReduce.create(input, reduce_op, tag, ranks, group_size)
-        )
+        return TensorBox.create(ir.AllReduce.create(input, reduce_op, tag, ranks, group_size))
 
     @register_lowering(aten.all_reduce_coalesced)
     def all_reduce_coalesced(input, reduce_op, tag, ranks, group_size):

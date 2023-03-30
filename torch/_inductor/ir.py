@@ -52,7 +52,7 @@ aten = torch.ops.aten
 
 """ [Note: Inductor IR]
 
-Inductor's IR is produced by executing 'lowering' code (see lowering.py).  Each
+Inductor's IR is produced by executing '' code (see lowering.py).  Each
 lowering is registered to a particular aten operator, and expects inputs that
 correspond to the aten schema.  However, in place of torch Tensor inputs, lowerings
 expect Inductor TensorBox inputs.
@@ -3984,11 +3984,22 @@ class CollectiveKernel(ExternKernel):
         self.name = V.graph.register_buffer(self)
 
     def should_allocate(self):
-        return True
+        return False
 
     def codegen_collective(self, wrapper, output_name, input_names):
         # factor so the boilerplate can be handled in CollectiveKernel.codegen
         raise NotImplementedError("Must implement")
+
+    @classmethod
+    def wrap_inputs_as_inplace(cls, inputs):
+        def wrap_input(var):
+            op = InPlaceHint(
+                FlexibleLayout(var.get_device(), var.get_dtype(), var.get_size()), var
+            )
+            return TensorBox.create(op)
+
+        return list(map(wrap_input, inputs))
+
 
     def codegen(self, wrapper):
         wrapper.add_import_once("import torch.distributed as dist")
@@ -4010,30 +4021,27 @@ class CollectiveKernel(ExternKernel):
         )
 
         self.codegen_collective(wrapper, output_name, input_names)
-
-        wrapper.writeline(f"_register_tensor_work({output_name}, {output_name}_work)")
+        wrapper.writeline(f"_register_tensor_work({input_names[0]}, {output_name}_work)")
 
 
 class MultiOutputNoSizeAssert(MultiOutput):
     """
-    Extract partial output from a multi-output OP.
-        Works like MultiOutput but doesn't assert size. This must be a property guaranteed by the op emiting this.
+    Works like MultiOutput but doesn't assert size. This must be a property guaranteed by the op emiting this.
     """
 
     def codegen(self, wrapper):
         wrapper.writeline(
             f"{self.get_name()} = {self.inputs[0].get_name()}{self.index}"
         )
+        # TODO should we set the input element in the array to None?
 
-
-class ForceInPlace(ExternKernel):
+class InPlaceHint(ExternKernel):
     """
     Helper OP to encode an in/out argument that tries to make it inplace whenever possible.
     Wrap the input of your inplace op to enable this behavior.
 
-    TODO: We should test whether wait_tensor can be a victim of reordering and lead to data races.
+    See collectives lowering for examples of how to use it.
     """
-
     def codegen(self, wrapper):
         input_name = self.inputs[0].codegen_reference()
         output_name = self.get_name()
@@ -4071,7 +4079,7 @@ class AllReduceCoalesced(ExternKernel):
 
         def wrap_input(var):
             nonlocal res
-            op = ForceInPlace(
+            op = InPlaceHint(
                 FlexibleLayout(var.get_device(), var.get_dtype(), var.get_size()), var
             )
             res.append(op)
@@ -4140,33 +4148,24 @@ class AllReduce(CollectiveKernel):
     def create(
         cls, x: "TensorBox", reduce_op: str, tag: str, ranks: List[int], group_size: int
     ):
-        x = cls.realize_input(x)
+        inputs = cls.wrap_inputs_as_inplace([x])
 
         # is there a difference between literally using x.data.layout below, vs
         # creating a new one that has the same properties?
-        new_layout = FlexibleLayout(x.get_device(), x.get_dtype(), x.get_size())
+        new_layout = FlexibleLayout(inputs[0].get_device(), inputs[0].get_dtype(), inputs[0].get_size())
 
         return AllReduce(
             layout=new_layout,
-            inputs=[x],
+            inputs=inputs,
             constant_args=[tag, ranks, group_size],
             reduce_op=reduce_op,
         )
 
     def codegen_collective(self, wrapper, output_name, input_names):
-        # We must copy our input buffer sometimes, but the scheduler will help us find opportunities
-        # to reuse the input buffer.  (This requires no other users of the input buffer.)
-        if not wrapper.did_reuse(self, self.inputs[0]):
-            wrapper.writeline(f"{output_name}.copy_({input_names[0]})")
-
-        # At this point, output_name points to a buffer that is either
-        # (1) the input buffer, which we're allowed to inplace modify
-        # (2) a freshly allocated buffer, which we've copied the input into above
         wrapper.writeline(
             f"{output_name}_work = dist.all_reduce("
-            f"{output_name}, async_op=True, group={output_name}_pg, op=_str_to_reduce_op('{str(self.reduce_op)}'))"
+            f"{input_names[0]}, async_op=True, group={output_name}_pg, op=_str_to_reduce_op('{str(self.reduce_op)}'))"
         )
-
 
 class AllGatherIntoTensor(CollectiveKernel):
     def __init__(self, layout, inputs, constant_args):
