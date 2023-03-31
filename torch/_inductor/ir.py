@@ -4021,7 +4021,10 @@ class CollectiveKernel(ExternKernel):
         )
 
         self.codegen_collective(wrapper, output_name, input_names)
-        wrapper.writeline(f"_register_tensor_work({input_names[0]}, {output_name}_work)")
+        wrapper.writeline(f"_register_tensor_work({input_names[0]}, {output_name}_work, {len(input_names)})")
+
+        for in_name in input_names:
+            wrapper.writeline(f"_register_wrapper_tensor({in_name}, {input_names[0]})")
 
 
 class MultiOutputNoSizeAssert(MultiOutput):
@@ -4057,14 +4060,11 @@ class InPlaceHint(ExternKernel):
         return True
 
 
-class AllReduceCoalesced(ExternKernel):
+class AllReduceCoalesced(CollectiveKernel):
     def __init__(self, layout, inputs, constant_args, reduce_op):
-        super().__init__(None, layout, inputs, constant_args)
+        super().__init__(layout, inputs, constant_args)
         self.reduce_op = reduce_op
         self.name = V.graph.register_buffer(self)
-
-    def should_allocate(self):
-        return False
 
     @classmethod
     def create(
@@ -4075,17 +4075,7 @@ class AllReduceCoalesced(ExternKernel):
         ranks: List[int],
         group_size: int,
     ):
-        res = []
-
-        def wrap_input(var):
-            nonlocal res
-            op = InPlaceHint(
-                FlexibleLayout(var.get_device(), var.get_dtype(), var.get_size()), var
-            )
-            res.append(op)
-            return TensorBox.create(op)
-
-        inputs = list(map(wrap_input, inputs))
+        inputs = cls.wrap_inputs_as_inplace(inputs)
 
         layout = MultiOutputLayout(inputs[0].get_device())
 
@@ -4095,6 +4085,7 @@ class AllReduceCoalesced(ExternKernel):
             constant_args=[tag, ranks, group_size],
             reduce_op=reduce_op,
         )
+        res = []
         for i, in_t in enumerate(inputs):
             res.append(
                 MultiOutputNoSizeAssert(
@@ -4107,27 +4098,10 @@ class AllReduceCoalesced(ExternKernel):
             )
         return res
 
-    def codegen(self, wrapper):
-        wrapper.add_import_once("import torch.distributed as dist")
-        wrapper.add_import_once(
-            "from torch.distributed._functional_collectives import _str_to_reduce_op, _register_tensor_work"
-        )
-        wrapper.add_import_once(
-            "from torch.distributed.distributed_c10d import _find_or_create_pg_by_ranks_and_tag"
-        )
-
-        output_name = self.get_name()
-        tag, ranks, group_size = self.constant_args
-
-        wrapper.writeline(
-            f"{output_name}_pg = _find_or_create_pg_by_ranks_and_tag('{tag}', {ranks}, {group_size})"
-        )
-
-        inputs = []
-        for inp in self.inputs:
-            inputs.append(inp.codegen_reference())
-
-        wrapper.writeline(f"{output_name} = [{','.join(inputs)}] ")
+    def codegen_collective(self, wrapper, output_name, input_names):
+        print("-----ajajajajajajajajajajajajajajajaj")
+        raise Exception("d")
+        wrapper.writeline(f"{output_name} = [{','.join(input_names)}] ")
 
         wrapper.writeline(
             f"{output_name}_work = dist.all_reduce_coalesced("
@@ -4136,8 +4110,6 @@ class AllReduceCoalesced(ExternKernel):
             f"group={output_name}_pg, "
             "async_op=True)"
         )
-        wrapper.writeline(f"_register_tensor_work({inputs[0]}, {output_name}_work)")
-
 
 class AllReduce(CollectiveKernel):
     def __init__(self, layout, inputs, constant_args, reduce_op):
