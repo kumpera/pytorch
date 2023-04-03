@@ -333,15 +333,7 @@ def all_reduce(self: torch.Tensor, reduceOp: str, group: RANK_TYPES, tag: str = 
     """
     tag, rankset, group_size = _expand_group(group, tag)
     tensor = torch._C._nn.all_reduce(self, reduceOp, tag, rankset, group_size)  # type: ignore[attr-defined]
-<<<<<<< HEAD
     return _maybe_wrap_tensor(tensor)
-
-
-=======
-    res = AsyncCollectiveTensor(tensor, WaitHolder(tensor))
-    _register_wrapper_tensor(res, tensor)
-    return res
->>>>>>> Add prototype for all_reduce_coalesced. Codegen no optimal. Might not work if any outputs is unused.
 
 def reduce_scatter_tensor(
     self: torch.Tensor,

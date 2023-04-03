@@ -310,6 +310,10 @@ class ProcessLocalGroup(dist.ProcessGroup):
         ProcessLocalGroup._end_coll(coll, self)
         return res
 
+    def _reduce_scatter_base(self, output, input, opts=ReduceScatterOptions()):
+        return self.reduce_scatter([output], [input.chunk(self._world_size)], opts)
+
+
     def __init__(self, rank, world_size):
         super().__init__(rank, world_size)
         self._rank = rank

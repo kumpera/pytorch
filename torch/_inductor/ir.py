@@ -3986,6 +3986,9 @@ class CollectiveKernel(ExternKernel):
     def should_allocate(self):
         return False
 
+    def track_output(self):
+        return False
+
     def codegen_collective(self, wrapper, output_name, input_names):
         # factor so the boilerplate can be handled in CollectiveKernel.codegen
         raise NotImplementedError("Must implement")
@@ -4021,10 +4024,15 @@ class CollectiveKernel(ExternKernel):
         )
 
         self.codegen_collective(wrapper, output_name, input_names)
-        wrapper.writeline(f"_register_tensor_work({input_names[0]}, {output_name}_work, {len(input_names)})")
+        if self.track_output():
+            wrapper.writeline(f"_register_tensor_work({output_name}, {output_name}_work, {1})")
 
-        for in_name in input_names:
-            wrapper.writeline(f"_register_wrapper_tensor({in_name}, {input_names[0]})")
+            wrapper.writeline(f"_register_wrapper_tensor({output_name}, {output_name})")
+        else:
+            wrapper.writeline(f"_register_tensor_work({input_names[0]}, {output_name}_work, {len(input_names)})")
+
+            for in_name in input_names:
+                wrapper.writeline(f"_register_wrapper_tensor({in_name}, {input_names[0]})")
 
 
 class MultiOutputNoSizeAssert(MultiOutput):
@@ -4064,7 +4072,6 @@ class AllReduceCoalesced(CollectiveKernel):
     def __init__(self, layout, inputs, constant_args, reduce_op):
         super().__init__(layout, inputs, constant_args)
         self.reduce_op = reduce_op
-        self.name = V.graph.register_buffer(self)
 
     @classmethod
     def create(
@@ -4085,22 +4092,20 @@ class AllReduceCoalesced(CollectiveKernel):
             constant_args=[tag, ranks, group_size],
             reduce_op=reduce_op,
         )
-        res = []
-        for i, in_t in enumerate(inputs):
-            res.append(
-                MultiOutputNoSizeAssert(
+        
+        return [
+            MultiOutputNoSizeAssert(
                     FlexibleLayout(
                         in_t.get_device(), in_t.get_dtype(), in_t.get_size()
                     ),
                     packed,
                     f"[{i}]",
                 )
-            )
-        return res
+            for i, in_t in enumerate(inputs)
+        ]
+
 
     def codegen_collective(self, wrapper, output_name, input_names):
-        print("-----ajajajajajajajajajajajajajajajaj")
-        raise Exception("d")
         wrapper.writeline(f"{output_name} = [{','.join(input_names)}] ")
 
         wrapper.writeline(
@@ -4163,11 +4168,6 @@ class AllGatherIntoTensor(CollectiveKernel):
         )
 
     def codegen_collective(self, wrapper, output_name, input_names):
-        wrapper.writeline(
-            f"{output_name}_work = dist.all_gather_into_tensor("
-            f"{output_name}, {input_names[0]}, async_op=True, group={output_name}_pg)"
-        )
-
         # At this point, output_name points to a fresh buffer
         wrapper.writeline(
             f"{output_name}_work = dist.all_gather_into_tensor({output_name}, {input_names[0]}, async_op=True,"
@@ -4182,6 +4182,12 @@ class ReduceScatterTensor(CollectiveKernel):
         self.reduce_op = reduce_op
         # TODO support dim
         self.scatter_dim = scatter_dim
+
+    def should_allocate(self):
+        return True
+
+    def track_output(self):
+        return True
 
     @classmethod
     def create(
