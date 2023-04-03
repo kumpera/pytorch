@@ -4148,6 +4148,12 @@ class AllGatherIntoTensor(CollectiveKernel):
     def __init__(self, layout, inputs, constant_args):
         super().__init__(layout, inputs, constant_args)
 
+    def should_allocate(self):
+        return True
+
+    def track_output(self):
+        return True
+
     @classmethod
     def create(cls, x: "TensorBox", tag: str, ranks: List[int], group_size: int):
         x = cls.realize_input(x)
@@ -4173,7 +4179,6 @@ class AllGatherIntoTensor(CollectiveKernel):
             f"{output_name}_work = dist.all_gather_into_tensor({output_name}, {input_names[0]}, async_op=True,"
             f" group={output_name}_pg)"
         )
-        wrapper.writeline(f"_register_tensor_work({output_name}, {output_name}_work)")
 
 
 class ReduceScatterTensor(CollectiveKernel):

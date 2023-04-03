@@ -335,6 +335,13 @@ def all_reduce(self: torch.Tensor, reduceOp: str, group: RANK_TYPES, tag: str = 
     tensor = torch._C._nn.all_reduce(self, reduceOp, tag, rankset, group_size)  # type: ignore[attr-defined]
     return _maybe_wrap_tensor(tensor)
 
+
+def all_gather(self: torch.Tensor, group: RANK_TYPES, tag: str = ""):
+    tag, rankset, group_size = _expand_group(group, tag)
+    tensor = torch._C._nn.all_gather_into_tensor(self, tag, rankset, group_size)  # type: ignore[attr-defined]
+    return _maybe_wrap_tensor(tensor)
+
+
 def reduce_scatter_tensor(
     self: torch.Tensor,
     reduceOp: str,

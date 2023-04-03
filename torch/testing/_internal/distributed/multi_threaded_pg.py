@@ -314,6 +314,9 @@ class ProcessLocalGroup(dist.ProcessGroup):
         return self.reduce_scatter([output], [input.chunk(self._world_size)], opts)
 
 
+    def _allgather_base(self, output_tensor, input_tensor):
+        return self.allgather([output_tensor.chunk(self._world_size)], [input_tensor], None)
+
     def __init__(self, rank, world_size):
         super().__init__(rank, world_size)
         self._rank = rank
