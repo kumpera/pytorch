@@ -4027,11 +4027,28 @@ class CollectiveKernel(ExternKernel):
         self.name = V.graph.register_buffer(self)
 
     def should_allocate(self):
-        return True
+        return self.track_output()
+
+    def track_output(self):
+        """
+        Returns true if the output is a fresh copy and should be tracked instead of the inputs.
+        This controls whether inputs are to be treated as in-place or not.
+        """
+        return False
 
     def codegen_collective(self, wrapper, output_name, input_names):
         # factor so the boilerplate can be handled in CollectiveKernel.codegen
         raise NotImplementedError("Must implement")
+
+    @classmethod
+    def wrap_inputs_as_inplace(cls, inputs):
+        def wrap_input(var):
+            op = InPlaceHint(
+                FlexibleLayout(var.get_device(), var.get_dtype(), var.get_size()), var
+            )
+            return TensorBox.create(op)
+
+        return list(map(wrap_input, inputs))
 
     def codegen(self, wrapper):
         wrapper.add_import_once("import torch.distributed as dist")
@@ -4053,14 +4070,26 @@ class CollectiveKernel(ExternKernel):
         )
 
         self.codegen_collective(wrapper, output_name, input_names)
+        if self.track_output():
+            wrapper.writeline(
+                f"_register_tensor_work({output_name}, {output_name}_work, {1})"
+            )
 
-        wrapper.writeline(f"_register_tensor_work({output_name}, {output_name}_work)")
+            wrapper.writeline(f"_register_wrapper_tensor({output_name}, {output_name})")
+        else:
+            wrapper.writeline(
+                f"_register_tensor_work({input_names[0]}, {output_name}_work, {len(input_names)})"
+            )
+
+            for in_name in input_names:
+                wrapper.writeline(
+                    f"_register_wrapper_tensor({in_name}, {input_names[0]})"
+                )
 
 
 class MultiOutputNoSizeAssert(MultiOutput):
     """
-    Extract partial output from a multi-output OP.
-        Works like MultiOutput but doesn't assert size. This must be a property guaranteed by the op emiting this.
+    Works like MultiOutput but doesn't assert size. This must be a property guaranteed by the op emiting this.
     """
 
     def codegen(self, wrapper):
@@ -4069,12 +4098,12 @@ class MultiOutputNoSizeAssert(MultiOutput):
         )
 
 
-class ForceInPlace(ExternKernel):
+class InPlaceHint(ExternKernel):
     """
     Helper OP to encode an in/out argument that tries to make it inplace whenever possible.
     Wrap the input of your inplace op to enable this behavior.
 
-    TODO: We should test whether wait_tensor can be a victim of reordering and lead to data races.
+    See collectives lowering for examples of how to use it.
     """
 
     def codegen(self, wrapper):
@@ -4092,14 +4121,10 @@ class ForceInPlace(ExternKernel):
         return True
 
 
-class AllReduceCoalesced(ExternKernel):
+class AllReduceCoalesced(CollectiveKernel):
     def __init__(self, layout, inputs, constant_args, reduce_op):
-        super().__init__(None, layout, inputs, constant_args)
+        super().__init__(layout, inputs, constant_args)
         self.reduce_op = reduce_op
-        self.name = V.graph.register_buffer(self)
-
-    def should_allocate(self):
-        return False
 
     @classmethod
     def create(
@@ -4110,17 +4135,7 @@ class AllReduceCoalesced(ExternKernel):
         ranks: List[int],
         group_size: int,
     ):
-        res = []
-
-        def wrap_input(var):
-            nonlocal res
-            op = ForceInPlace(
-                FlexibleLayout(var.get_device(), var.get_dtype(), var.get_size()), var
-            )
-            res.append(op)
-            return TensorBox.create(op)
-
-        inputs = list(map(wrap_input, inputs))
+        inputs = cls.wrap_inputs_as_inplace(inputs)
 
         layout = MultiOutputLayout(inputs[0].get_device())
 
@@ -4130,39 +4145,18 @@ class AllReduceCoalesced(ExternKernel):
             constant_args=[tag, ranks, group_size],
             reduce_op=reduce_op,
         )
-        for i, in_t in enumerate(inputs):
-            res.append(
-                MultiOutputNoSizeAssert(
-                    FlexibleLayout(
-                        in_t.get_device(), in_t.get_dtype(), in_t.get_size()
-                    ),
-                    packed,
-                    f"[{i}]",
-                )
+
+        return [
+            MultiOutputNoSizeAssert(
+                FlexibleLayout(in_t.get_device(), in_t.get_dtype(), in_t.get_size()),
+                packed,
+                f"[{i}]",
             )
-        return res
+            for i, in_t in enumerate(inputs)
+        ]
 
-    def codegen(self, wrapper):
-        wrapper.add_import_once("import torch.distributed as dist")
-        wrapper.add_import_once(
-            "from torch.distributed._functional_collectives import _str_to_reduce_op, _register_tensor_work"
-        )
-        wrapper.add_import_once(
-            "from torch.distributed.distributed_c10d import _find_or_create_pg_by_ranks_and_tag"
-        )
-
-        output_name = self.get_name()
-        tag, ranks, group_size = self.constant_args
-
-        wrapper.writeline(
-            f"{output_name}_pg = _find_or_create_pg_by_ranks_and_tag('{tag}', {ranks}, {group_size})"
-        )
-
-        inputs = []
-        for inp in self.inputs:
-            inputs.append(inp.codegen_reference())
-
-        wrapper.writeline(f"{output_name} = [{','.join(inputs)}] ")
+    def codegen_collective(self, wrapper, output_name, input_names):
+        wrapper.writeline(f"{output_name} = [{','.join(input_names)}] ")
 
         wrapper.writeline(
             f"{output_name}_work = dist.all_reduce_coalesced("
@@ -4171,7 +4165,6 @@ class AllReduceCoalesced(ExternKernel):
             f"group={output_name}_pg, "
             "async_op=True)"
         )
-        wrapper.writeline(f"_register_tensor_work({inputs[0]}, {output_name}_work)")
 
 
 class AllReduce(CollectiveKernel):
@@ -4183,37 +4176,34 @@ class AllReduce(CollectiveKernel):
     def create(
         cls, x: "TensorBox", reduce_op: str, tag: str, ranks: List[int], group_size: int
     ):
-        x = cls.realize_input(x)
+        inputs = cls.wrap_inputs_as_inplace([x])
 
         # is there a difference between literally using x.data.layout below, vs
         # creating a new one that has the same properties?
-        new_layout = FlexibleLayout(x.get_device(), x.get_dtype(), x.get_size())
+        new_layout = FlexibleLayout(
+            inputs[0].get_device(), inputs[0].get_dtype(), inputs[0].get_size()
+        )
 
         return AllReduce(
             layout=new_layout,
-            inputs=[x],
+            inputs=inputs,
             constant_args=[tag, ranks, group_size],
             reduce_op=reduce_op,
         )
 
     def codegen_collective(self, wrapper, output_name, input_names):
-        # We must copy our input buffer sometimes, but the scheduler will help us find opportunities
-        # to reuse the input buffer.  (This requires no other users of the input buffer.)
-        if not wrapper.did_reuse(self, self.inputs[0]):
-            wrapper.writeline(f"{output_name}.copy_({input_names[0]})")
-
-        # At this point, output_name points to a buffer that is either
-        # (1) the input buffer, which we're allowed to inplace modify
-        # (2) a freshly allocated buffer, which we've copied the input into above
         wrapper.writeline(
             f"{output_name}_work = dist.all_reduce("
-            f"{output_name}, async_op=True, group={output_name}_pg, op=_str_to_reduce_op('{str(self.reduce_op)}'))"
+            f"{input_names[0]}, async_op=True, group={output_name}_pg, op=_str_to_reduce_op('{str(self.reduce_op)}'))"
         )
 
 
 class AllGatherIntoTensor(CollectiveKernel):
     def __init__(self, layout, inputs, constant_args):
         super().__init__(layout, inputs, constant_args)
+
+    def track_output(self):
+        return True
 
     @classmethod
     def create(cls, x: "TensorBox", tag: str, ranks: List[int], group_size: int):
@@ -4235,23 +4225,20 @@ class AllGatherIntoTensor(CollectiveKernel):
         )
 
     def codegen_collective(self, wrapper, output_name, input_names):
-        wrapper.writeline(
-            f"{output_name}_work = dist.all_gather_into_tensor("
-            f"{output_name}, {input_names[0]}, async_op=True, group={output_name}_pg)"
-        )
-
         # At this point, output_name points to a fresh buffer
         wrapper.writeline(
             f"{output_name}_work = dist.all_gather_into_tensor({output_name}, {input_names[0]}, async_op=True,"
             f" group={output_name}_pg)"
         )
-        wrapper.writeline(f"_register_tensor_work({output_name}, {output_name}_work)")
 
 
 class ReduceScatterTensor(CollectiveKernel):
     def __init__(self, layout, inputs, constant_args, reduce_op):
         super().__init__(layout, inputs, constant_args)
         self.reduce_op = reduce_op
+
+    def track_output(self):
+        return True
 
     @classmethod
     def create(
