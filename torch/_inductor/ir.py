@@ -4270,3 +4270,49 @@ class ReduceScatterTensor(CollectiveKernel):
             f"{output_name}, {input_names[0]}, "
             f"async_op=True, group={output_name}_pg, op=_str_to_reduce_op('{str(self.reduce_op)}'))"
         )
+
+class AllGatherIntoTensorCoalesced(CollectiveKernel):
+    def __init__(self, layout, inputs, constant_args, reduce_op):
+        super().__init__(layout, inputs, constant_args)
+        self.reduce_op = reduce_op
+
+    @classmethod
+    def create(
+        cls,
+        inputs: List["TensorBox"],
+        reduce_op: str,
+        tag: str,
+        ranks: List[int],
+        group_size: int,
+    ):
+        inputs = [cls.realize_input(x) for x in inputs]
+
+        layout = MultiOutputLayout(inputs[0].get_device())
+
+        packed = AllGatherIntoTensorCoalesced(
+            layout=layout,
+            inputs=inputs,
+            constant_args=[tag, ranks, group_size],
+            reduce_op=reduce_op,
+        )
+
+        return [
+            MultiOutputNoSizeAssert(
+                FlexibleLayout(in_t.get_device(), in_t.get_dtype(), in_t.get_size()),
+                packed,
+                f"[{i}]",
+            )
+            for i, in_t in enumerate(inputs)
+        ]
+
+    def codegen_collective(self, wrapper, output_name, input_names):
+        wrapper.writeline(f"{output_name} = [{','.join(input_names)}] ")
+
+        wrapper.writeline(
+            f"{output_name}_work = dist.all_reduce_coalesced("
+            f"{output_name}, "
+            f"op=_str_to_reduce_op('{str(self.reduce_op)}'), "
+            f"group={output_name}_pg, "
+            "async_op=True)"
+        )
+
