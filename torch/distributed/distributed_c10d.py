@@ -3903,10 +3903,55 @@ def _get_group_tag(pg: ProcessGroup) -> str:
     return tag
 
 
-def _all_gather_into_tensor_coalesced(input_tensors, output_tensors, group, async_op=False):
+class _CollectivesBatch:
+    def __init__(self, group, async_op):
+        self.group = group
+        self.async_op = async_op
+        self.collectives = []
+        self.tensor_idx = 0
+
+    def arg_count(self):
+        return self.tensor_idx
+
+    def all_gather_into_tensor(self) -> Tuple[int, int]:
+        # Indices to use for output and input
+        offsets = (self.tensor_idx, self.tensor_idx + 1)
+        self.collectives.append(("all_gather", offsets))
+        self.tensor_idx += 2
+        return offsets
+
+    def reduce_scatter_into_tensor(self, reduce_op: str) -> Tuple[int, int]:
+        # Indices to use for output and input
+        offsets = (self.tensor_idx, self.tensor_idx + 1)
+        self.collectives.append(("reduce_scatter", offsets, reduce_op))
+        self.tensor_idx += 2
+        return offsets
+
+def _run_collectives_batch(batch: _CollectivesBatch, tensors: List[torch.Tensor]) -> List[Work]:
     work_list = []
-    with _coalescing_manager(group, input_tensors[0].device, work_list):
-        for shard, out_tensor in zip(input_tensors, output_tensors):
-            work = all_gather_into_tensor(out_tensor, shard, group=group, async_op=async_op)
+    group = batch.group
+    with _coalescing_manager(group, tensors[0].device, work_list):
+        for col in batch.collectives:
+            col_name = col[0]
+            col_offsets = col[1]
+            output_tensor = tensors[col_offsets[0]]
+            input_tensor = tensors[col_offsets[1]]
+            if col_name == "all_gather":
+                work = all_gather_into_tensor(output_tensor, input_tensor, group=group, async_op=batch.async_op)
+            elif col_name == "reduce_scatter":
+                work = reduce_scatter_tensor(output_tensor, input_tensor, op=col[2], group=group, async_op=batch.async_op)
+            else:
+                raise RuntimeError(f"Cannot handle batched {col_name}")
             work_list.append(work)
     return work_list
+
+def _all_gather_into_tensor_coalesced(input_tensors, output_tensors, group, async_op=False):
+    # A lot of this conversion is pure overhead, but showcase the capabilities of this setup.
+    batch = _CollectivesBatch(group, async_op)
+    all_offsets = [batch.all_gather_into_tensor() for _ in input_tensor]
+    tensors = [None] * batch.arg_count()
+
+    for offsets, input_tensor, out_tensor in zip(all_offsets, input_tensors, output_tensors):
+        tensors[offsets[0]] = out_tensor
+        tensors[offsets[1]] = input_tensor
+    return _run_collectives_batch(batch, tensors)

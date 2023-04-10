@@ -251,7 +251,7 @@ def _all_gather_into_tensor_coalesced(self, tag, rankset, group_size):
     return out_tensors
 
 
-def _reduce_scatter_tensor(
+def _reduce_scatter_into_tensor(
     input: torch.Tensor,
     reduceOp: str,
     tag: str,
@@ -271,6 +271,37 @@ def _reduce_scatter_tensor(
     _register_tensor_work(out_tensor, work, 1)
 
     return out_tensor
+
+def _reduce_scatter_into_tensor_coalesced(
+    input: List[torch.Tensor],
+    reduceOp: str,
+    tag: str,
+    ranks: List[int],
+    group_size: int,
+):
+    group = c10d._find_or_create_pg_by_ranks_and_tag(tag, ranks, group_size)
+    assert group is not None
+    op = _str_to_reduce_op(reduceOp)
+
+    batch = c10d._CollectivesBatch(group, True)
+    tensors = [None] * (len(input) * 2)
+    out_tensors = []
+    op = _str_to_reduce_op(reduceOp)
+    for tensor in input:
+        out_size = list(tensor.size())
+        out_size[0] //= group_size
+        out_tensor = tensor.new_empty(out_size)
+        output_offset, input_offset = batch.reduce_scatter_into_tensor(op)
+
+        tensors[input_offset] = tensor
+        tensors[output_offset] = out_tensor
+        out_tensors.append(out_tensor)
+
+    work_list = c10d._run_collectives_batch(batch, tensors)
+    for tensor, work in zip(out_tensors, work_list):
+        _register_tensor_work(tensor, work, 1)
+
+    return out_tensors
 
 
 RANK_TYPES = Union[List[int], List[List[int]], dist.ProcessGroup, "dist._tensor.DeviceMesh", Tuple["dist._tensor.DeviceMesh", int]]
@@ -395,7 +426,7 @@ def all_gather_tensor(
         res = torch.cat(torch.chunk(res, group_size, dim=0), dim=gather_dim)
     return res
 
-def reduce_scatter_tensor(
+def reduce_scatter_into_tensor(
     self: torch.Tensor,
     reduceOp: str,
     scatter_dim: int,
@@ -425,9 +456,36 @@ def reduce_scatter_tensor(
         tensor_list = torch.chunk(self, group_size, dim=scatter_dim)
         self = torch.cat(tensor_list)
 
-    tensor = torch.ops.c10d_functional.reduce_scatter_tensor(self, reduceOp, tag, rankset, group_size)  # type: ignore[attr-defined]
+    tensor = torch.ops.c10d_functional.reduce_scatter_into_tensor(self, reduceOp, tag, rankset, group_size)  # type: ignore[attr-defined]
     res = _maybe_wrap_tensor(tensor)
     return res
+
+def reduce_scatter_into_tensor_coalesced(
+    self: List[torch.Tensor],
+    reduceOp: str,
+    group: RANK_TYPES,
+    tag: str = "",
+):
+    """
+    Reduces the tensor data across all machines in such a way that all get
+    the final result, then scatter the results to corresponding ranks.
+
+    The input tensor is left unmodified.
+    Group can be one of:
+        List[int]: ranks participating in the collective.
+        List[List[int]]: 2D mesh of ranks taking part of this collective in MPMD.
+        ProcessGroup: Will perform a collective using the ranks and tag of the PG.
+        DeviceMesh: Do a SPMD collective over all ranks of the mesh
+        (DeviceMesh, int): Do a MPMD collective over one dimension of the DeviceMesh
+    :: N.B. If you pass a PG or a 1D list to perform a MPMD collective, the compiler won't be able to recover
+    that information and perform collective algebraic optimization. Use other forms of input for that.
+    """
+    tag, rankset, group_size = _expand_group(group, tag)
+    tensor_list = torch.ops.c10d_functional.reduce_scatter_into_tensor_coalesced(self, reduceOp, tag, rankset, group_size)  # type: ignore[attr-defined]
+
+    if _are_we_tracing():
+        return list(map(wait_tensor, tensor_list))
+    return list(map(_maybe_wrap_tensor, tensor_list))
 
 
 def all_reduce_coalesced(self: List[torch.Tensor], reduceOp: str, group: RANK_TYPES, tag: str = "") -> List[torch.Tensor]:
@@ -464,23 +522,12 @@ def all_reduce_coalesced(self: List[torch.Tensor], reduceOp: str, group: RANK_TY
     return res
 
 def all_gather_into_tensor_coalesced(self: List[torch.Tensor], group: RANK_TYPES, tag: str = "") -> List[List[torch.Tensor]]:
-
     tag, rankset, group_size = _expand_group(group, tag)
     tensor_list = torch.ops.c10d_functional.all_gather_into_tensor_coalesced(self, tag, rankset, group_size)  # type: ignore[attr-defined]
 
     if _are_we_tracing():
         return list(map(wait_tensor, tensor_list))
     return list(map(_maybe_wrap_tensor, tensor_list))
-
-def _all_gather_into_tensor_coalesced_meta(self, tag, rankset, group_size):
-    def mk_out_tensor(shard):
-        out_size = list(shard.size())
-        out_size[0] *= group_size
-        out_tensor = shard.new_empty(out_size)
-        return out_tensor
-
-    return [mk_out_tensor(t) for t in self]
-
 
 c10_lib = torch.library.Library("c10d_functional", "DEF")
 c10_lib_impl = torch.library.Library("c10d_functional", "IMPL")
@@ -497,13 +544,30 @@ def _all_gather_into_tensor_meta(shard, tag, rankset, group_size):
     out_size[0] *= group_size
     return shard.new_empty(out_size)
 
-def _reduce_scatter_tensor_meta(input, reduce_op, tag, rankset, group_size):
+def _reduce_scatter_into_tensor_meta(input, reduce_op, tag, rankset, group_size):
     out_size = list(input.size())
     out_size[0] //= group_size
     return input.new_empty(out_size)
 
 def _all_reduce_coalesced_meta(self, reduceOp, tag, rankset, group_size):
     return [torch.empty_like(t) for t in self]
+
+def _reduce_scatter_into_tensor_coalesced_meta(self, reduceOp, tag, rankset, group_size):
+    res = []
+    for tensor in self:
+        out_size = list(tensor.size())
+        out_size[0] //= group_size
+        res.append(torch.empty_like(out_size))
+    return res
+
+def _all_gather_into_tensor_coalesced_meta(self, tag, rankset, group_size):
+    def mk_out_tensor(shard):
+        out_size = list(shard.size())
+        out_size[0] *= group_size
+        out_tensor = shard.new_empty(out_size)
+        return out_tensor
+
+    return [mk_out_tensor(t) for t in self]
 
 def _register_ops():
     ops_defs = [
@@ -512,7 +576,8 @@ def _register_ops():
         "wait_tensor(Tensor self) -> Tensor",
         "all_gather_into_tensor(Tensor shard, str tag, int[] ranks, int group_size) -> Tensor",
         "all_gather_into_tensor_coalesced(Tensor[] input, str tag, int[] ranks, int group_size) -> Tensor[]",
-        "reduce_scatter_tensor(Tensor input, str reduceOp, str tag, int[] ranks, int group_size) -> Tensor",
+        "reduce_scatter_into_tensor(Tensor input, str reduceOp, str tag, int[] ranks, int group_size) -> Tensor",
+        "reduce_scatter_into_tensor_coalesced(Tensor[] input, str reduceOp, str tag, int[] ranks, int group_size) -> Tensor[]",
     ]
 
     my_module = sys.modules[__name__]
