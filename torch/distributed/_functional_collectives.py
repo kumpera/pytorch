@@ -529,6 +529,50 @@ def all_gather_into_tensor_coalesced(self: List[torch.Tensor], group: RANK_TYPES
         return list(map(wait_tensor, tensor_list))
     return list(map(_maybe_wrap_tensor, tensor_list))
 
+def all_to_all_into_tensor(
+    self: torch.Tensor, 
+    output_split_sizes: Union[List[int], torch.Tensor],
+    input_split_sizes: Union[List[int], torch.Tensor],
+    group: RANK_TYPES, tag: str = ""
+) -> torch.Tensor:
+    def ensure_tensor(val) -> torch.Tensor:
+        if not isinstance(val, torch.Tensor):
+            return torch.Tensor(val, dtype=torch.long64)
+        return val
+    tag, rankset, group_size = _expand_group(group, tag)
+    res = torch.ops.c10d_functional.all_to_all_into_tensor(
+        self,
+        ensure_tensor(output_split_sizes),
+        ensure_tensor(input_split_sizes),
+        tag, rankset, group_size
+    )  # type: ignore[attr-defined]
+
+    return _maybe_wrap_tensor(res)
+
+
+#     def alltoall_base_(
+#     input_tensor: torch.Tensor,
+#     output_split_sizes: Union[List[int], torch.Tensor],
+#     input_split_sizes: Union[List[int], torch.Tensor],
+# ) -> Tuple[dist.Work, torch.Tensor]:
+#     if isinstance(output_split_sizes, torch.Tensor):
+#         output_split_sizes = output_split_sizes.tolist()
+#     if isinstance(input_split_sizes, torch.Tensor):
+#         input_split_sizes = input_split_sizes.tolist()
+#     output_tensor = torch.empty(
+#         sum(output_split_sizes), dtype=input_tensor.dtype, device=input_tensor.device
+#     )
+#     return (
+#         dist.all_to_all_single(
+#             output_tensor,
+#             input_tensor,
+#             output_split_sizes,
+#             input_split_sizes,
+#             async_op=True,
+#         ),
+#         output_tensor,
+
+
 c10_lib = torch.library.Library("c10d_functional", "DEF")
 c10_lib_impl = torch.library.Library("c10d_functional", "IMPL")
 
