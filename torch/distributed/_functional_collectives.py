@@ -505,8 +505,39 @@ def _reduce_scatter_tensor_meta(input, reduce_op, tag, rankset, group_size):
 def _all_reduce_coalesced_meta(self, reduceOp, tag, rankset, group_size):
     return [torch.empty_like(t) for t in self]
 
+
+
+def _start_coalescing(tag, rankset, group_size, device=None):
+    # raise RuntimeError("can't use directly")
+    return torch.empty([1], device=device)
+
+def _all_reduce2(self, reduceOp, coalescing_group):
+    print(f"HELLO {self} {coalescing_group}")
+    # raise RuntimeError("can't use directly")
+    return torch.empty_like(self)
+
+def _end_coalescing(collective_tensors, coalescing_group):
+    # raise RuntimeError("can't use directly")
+    return None
+
+def _start_coalescing_meta(tag, rankset, group_size, device=None):
+    return torch.empty([1], device=device)
+
+def _end_coalescing_meta(collective_tensors, coalescing_group):
+    return None
+
+def _all_reduce2_meta(self, *args):
+    return torch.empty_like(self)
+
+
+
 def _register_ops():
     ops_defs = [
+        "start_coalescing(str tag, int[] ranks, int group_size, *, Device? device=None) -> Tensor",
+        "end_coalescing(Tensor[] collective_tensors, Tensor coalescing_group) -> ()",
+        "all_reduce2(Tensor self, str reduceOp, Tensor coalescing_group=None) -> Tensor",
+
+
         "all_reduce(Tensor self, str reduceOp, str tag, int[] ranks, int group_size) -> Tensor",
         "all_reduce_coalesced(Tensor[] self, str reduceOp, str tag, int[] ranks, int group_size) -> Tensor[]",
         "wait_tensor(Tensor self) -> Tensor",

@@ -375,6 +375,7 @@ def constructors(fake_mode, func, *args, **kwargs):
     # _like constructors have fake tensor inputs (maybe this causes the non-like
     # to fail? hmmm)
     with in_kernel_invocation_manager(fake_mode):
+        print(f"-------invoking {func} with {args} -- {new_kwargs}")
         r = func(*args, **new_kwargs)
     return FakeTensor(fake_mode, r, out_device)
 
