@@ -535,7 +535,7 @@ def _register_ops():
     ops_defs = [
         "start_coalescing(str tag, int[] ranks, int group_size, *, Device? device=None) -> Tensor",
         "end_coalescing(Tensor[] collective_tensors, Tensor coalescing_group) -> ()",
-        "all_reduce2(Tensor self, str reduceOp, Tensor coalescing_group=None) -> Tensor",
+        "all_reduce2(Tensor self, str reduceOp, Tensor coalescing_group) -> Tensor",
 
 
         "all_reduce(Tensor self, str reduceOp, str tag, int[] ranks, int group_size) -> Tensor",

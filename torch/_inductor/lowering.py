@@ -3925,6 +3925,24 @@ try:
         result = ir.AllGatherIntoTensorCoalesced.create(self, tag, ranks, group_size)
         return list(map(TensorBox.create, result))
 
+    @register_lowering(c10d_functional.start_coalescing)
+    def start_coalescing(tag, ranks, group_size, device=None):
+        box, group = ir.StartCoalescing.create(tag, ranks, group_size, device)
+        V.graph.coalescing_group = group
+        return TensorBox.create(box)
+
+    @register_lowering(c10d_functional.all_reduce2)
+    def allreduce2(input, reduce_op, coalescing_group):
+        result = ir.AllReduce2.create(input, reduce_op, V.graph.coalescing_group)
+        return TensorBox.create(result)
+
+    @register_lowering(c10d_functional.end_coalescing)
+    def end_coalescing(collective_tensors, coalescing_group):
+        result = ir.EndCoalescing.create(collective_tensors, V.graph.coalescing_group)
+        V.graph.coalescing_group = None
+        return TensorBox.create(result)
+
+
 except ImportError:
     log.info(
         "Inductor support for distributed collectives depends on building torch.distributed"

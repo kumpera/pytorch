@@ -1937,12 +1937,14 @@ class Buffer(IRNode):
         return self.name
 
     def get_device(self):
+        print(f"-dddd-- {type(self)} --- {self.layout}")
         return self.layout.device
 
     def get_dtype(self):
         return getattr(self.layout, "dtype", None)
 
     def get_size(self):
+        # print(f"--- {type(self)} --- {self.layout}")
         return list(self.layout.size)
 
     def get_stride(self):
@@ -2335,6 +2337,7 @@ class InputsKernel(Buffer):
     inputs: List[Buffer]
 
     def get_read_writes(self):
+        print(f"------ >> {self} ::\n {self.inputs}")
         return dependencies.ReadWrites(
             {dependencies.StarDep(x.get_name()) for x in self.inputs},
             {dependencies.StarDep(self.get_name())},
@@ -2485,6 +2488,7 @@ class ExternKernel(InputsKernel):
 
     @staticmethod
     def copy_input(x):
+        print(f"----------AAAAAAAAA------- {x}")
         pw = Pointwise.create(
             device=x.get_device(),
             dtype=x.get_dtype(),
@@ -4097,9 +4101,10 @@ class InPlaceHint(ExternKernel):
     See collectives lowering for examples of how to use it.
     """
 
-    def __init__(self, layout, input):
+    def __init__(self, layout, input, raw_inputs=[]):
         input = self.realize_input(input)
-        super().__init__(None, layout, self.unwrap_storage([input]), ())
+        # raw_inputs = [self.realize_input(raw_inputs[0])
+        super().__init__(None, layout, self.unwrap_storage([input]) + raw_inputs, ())
         self.name = V.graph.register_buffer(self)
 
     def should_allocate(self):
@@ -4448,3 +4453,135 @@ class AllGatherIntoTensorCoalesced(ExternKernel):
             f"group={output_name}_pg, "
             "async_op=True)"
         )
+
+
+class StartCoalescing(ExternKernelAlloc):
+    """
+    Represent the output buffer used by ops that require multiple of them
+    """
+
+    def __init__(self, layout, constant_args):
+        super().__init__(layout=layout, inputs=[], constant_args=constant_args)
+        self.name = V.graph.register_buffer(self)
+
+    def should_allocate(self):
+        return False
+
+    def has_side_effects(self):
+        return True
+
+    def codegen(self, wrapper):
+        wrapper.writeline(f"# START_THE_COALESCING")
+        wrapper.writeline(f"{self.get_name()}_buffers = []")
+        wrapper.writeline(f"{self.get_name()} = None")
+
+    @classmethod
+    def create(
+        cls,
+        tag: str,
+        ranks: List[int],
+        group_size: int,
+        device: torch.device
+    ):
+        layout=FlexibleLayout(
+            device=device,
+            dtype=torch.int64,
+            size=[1],
+        ).as_fixed()
+        # layout=MultiOutputLayout(device=device)
+
+        ca = StartCoalescing(
+            layout=layout,
+            constant_args=[tag, ranks, group_size],
+        )
+
+        return Constant(
+            value=None,
+            dtype=torch.int64,
+            device=device
+        ), ca
+
+class AllReduce2(InPlaceHint):
+    """
+    Represent the output buffer used by ops that require multiple of them
+    """
+
+    def __init__(self, layout, input, reduce_op, coalescing_group):
+        super().__init__(layout=layout, input=input)#, raw_inputs=[ExternKernel.realize_input(coalescing_group)])
+        self.constant_args = (reduce_op, )
+        self.coalescing_group = coalescing_group
+
+    def codegen(self, wrapper):
+        wrapper.writeline(f"#ALL_REDUCE, start")
+        super().codegen(wrapper)
+        wrapper.writeline(f"#ALL_REDUCE body")
+        group_name = self.coalescing_group.get_name()
+        wrapper.writeline(f"{group_name}_buffers.append({self.get_name()})")
+
+    @classmethod
+    def create(
+        cls,
+        input: "TensorBox",
+        reduce_op: str,
+        coalescing_group: "TensorBox"
+    ):
+        # inputs = CollectiveKernel.wrap_inputs_as_inplace([input])
+        input = cls.realize_input(input)
+        print(f"coa_group: {coalescing_group}")
+
+        # xx = InputsKernel.unwrap_storage([coalescing_group])
+        # print(f"jsdjdjd {xx}")
+
+        layout=FlexibleLayout(
+            device=input.get_device(),
+            dtype=input.get_dtype(),
+            size=input.get_size()
+        )
+
+        return AllReduce2(
+            layout=layout,
+            input=input, 
+            reduce_op=reduce_op,
+            coalescing_group=coalescing_group
+        )
+
+
+
+class EndCoalescing(ExternKernelAlloc):
+    """
+    Represent the output buffer used by ops that require multiple of them
+    """
+
+    def __init__(self, layout, inputs, coalescing_group):
+        # super().__init__(name=None, layout=layout, inputs=inputs)
+        super().__init__(layout=layout, inputs=inputs)
+        self.coalescing_group = coalescing_group
+        # self.name = V.graph.register_buffer(self)
+
+    def should_allocate(self):
+        return False
+
+    def has_side_effects(self):
+        return True
+
+    def codegen(self, wrapper):
+        wrapper.writeline(f"# END COALESCING!")
+
+    @classmethod
+    def create(
+        cls,
+        collective_tensors: List["TensorBox"],
+        coalescing_group: "TensorBox"
+    ):
+        layout=FlexibleLayout(
+            device=collective_tensors[0].get_device(),
+            dtype=collective_tensors[0].get_dtype(),
+            size=[0]
+        ).as_fixed()
+
+        return EndCoalescing(
+            layout=layout,
+            inputs=collective_tensors, 
+            coalescing_group=coalescing_group
+        )
+
