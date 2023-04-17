@@ -4101,10 +4101,9 @@ class InPlaceHint(ExternKernel):
     See collectives lowering for examples of how to use it.
     """
 
-    def __init__(self, layout, input, raw_inputs=[]):
+    def __init__(self, layout, input):
         input = self.realize_input(input)
-        # raw_inputs = [self.realize_input(raw_inputs[0])
-        super().__init__(None, layout, self.unwrap_storage([input]) + raw_inputs, ())
+        super().__init__(None, layout, self.unwrap_storage([input]), ())
         self.name = V.graph.register_buffer(self)
 
     def should_allocate(self):
@@ -4282,7 +4281,7 @@ class AllReduceCoalesced(InPlaceCollectiveKernel):
 
     def codegen_collective(self, wrapper, output_name, input_names):
         wrapper.writeline(
-            f"{output_name}_work = dist.all_reduce_coalesced("
+            f"{output_name}_work = dist.`all_reduce`_coalesced("
             f"{output_name}, "
             f"op=_str_to_reduce_op('{str(self.reduce_op)}'), "
             f"group={output_name}_pg, "
@@ -4463,6 +4462,7 @@ class StartCoalescing(ExternKernelAlloc):
     def __init__(self, layout, constant_args):
         super().__init__(layout=layout, inputs=[], constant_args=constant_args)
         self.name = V.graph.register_buffer(self)
+        self.coalescing_ops = []
 
     def should_allocate(self):
         return False
@@ -4471,19 +4471,12 @@ class StartCoalescing(ExternKernelAlloc):
         return True
 
     def codegen(self, wrapper):
-        wrapper.writeline(f"# START_THE_COALESCING")
         wrapper.writeline(f"{self.get_name()}_buffers = []")
         wrapper.writeline(f"{self.get_name()} = None")
 
     @classmethod
-    def create(
-        cls,
-        tag: str,
-        ranks: List[int],
-        group_size: int,
-        device: torch.device
-    ):
-        layout=FlexibleLayout(
+    def create(cls, tag: str, ranks: List[int], group_size: int, device: torch.device):
+        layout = FlexibleLayout(
             device=device,
             dtype=torch.int64,
             size=[1],
@@ -4495,11 +4488,8 @@ class StartCoalescing(ExternKernelAlloc):
             constant_args=[tag, ranks, group_size],
         )
 
-        return Constant(
-            value=None,
-            dtype=torch.int64,
-            device=device
-        ), ca
+        return Constant(value=None, dtype=torch.int64, device=device), ca
+
 
 class AllReduce2(InPlaceHint):
     """
@@ -4507,24 +4497,20 @@ class AllReduce2(InPlaceHint):
     """
 
     def __init__(self, layout, input, reduce_op, coalescing_group):
-        super().__init__(layout=layout, input=input)#, raw_inputs=[ExternKernel.realize_input(coalescing_group)])
-        self.constant_args = (reduce_op, )
+        super().__init__(layout=layout, input=input)
+        self.reduce_op = reduce_op
         self.coalescing_group = coalescing_group
+        coalescing_group.coalescing_ops.append(self)
 
     def codegen(self, wrapper):
-        wrapper.writeline(f"#ALL_REDUCE, start")
+        # wrapper.writeline(f"#ALL_REDUCE, start")
         super().codegen(wrapper)
-        wrapper.writeline(f"#ALL_REDUCE body")
+        # wrapper.writeline(f"#ALL_REDUCE body")
         group_name = self.coalescing_group.get_name()
         wrapper.writeline(f"{group_name}_buffers.append({self.get_name()})")
 
     @classmethod
-    def create(
-        cls,
-        input: "TensorBox",
-        reduce_op: str,
-        coalescing_group: "TensorBox"
-    ):
+    def create(cls, input: "TensorBox", reduce_op: str, coalescing_group: "TensorBox"):
         # inputs = CollectiveKernel.wrap_inputs_as_inplace([input])
         input = cls.realize_input(input)
         print(f"coa_group: {coalescing_group}")
@@ -4532,19 +4518,16 @@ class AllReduce2(InPlaceHint):
         # xx = InputsKernel.unwrap_storage([coalescing_group])
         # print(f"jsdjdjd {xx}")
 
-        layout=FlexibleLayout(
-            device=input.get_device(),
-            dtype=input.get_dtype(),
-            size=input.get_size()
+        layout = FlexibleLayout(
+            device=input.get_device(), dtype=input.get_dtype(), size=input.get_size()
         )
 
         return AllReduce2(
             layout=layout,
-            input=input, 
+            input=input,
             reduce_op=reduce_op,
-            coalescing_group=coalescing_group
+            coalescing_group=coalescing_group,
         )
-
 
 
 class EndCoalescing(ExternKernelAlloc):
@@ -4565,23 +4548,58 @@ class EndCoalescing(ExternKernelAlloc):
         return True
 
     def codegen(self, wrapper):
-        wrapper.writeline(f"# END COALESCING!")
+        wrapper.add_import_once("import torch.distributed as dist")
+        wrapper.add_import_once(
+            "from torch.distributed._functional_collectives import _str_to_reduce_op,"
+            "_register_tensor_work, _register_wrapper_tensor"
+        )
+        wrapper.add_import_once(
+            "from torch.distributed.distributed_c10d import _find_or_create_pg_by_ranks_and_tag"
+        )
+
+        output_name = self.get_name()
+        tag, ranks, group_size = self.coalescing_group.constant_args
+
+        # # TODO: avoid more than one ref of the same pg (even though they are cached inside the api)
+        wrapper.writeline(
+            f"{output_name}_pg = _find_or_create_pg_by_ranks_and_tag('{tag}', {ranks}, {group_size})"
+        )
+
+        # TODO loop thought self.coalescing_group.coalescing_ops and figure out what to do
+        # For now, we hardcode to all_reduce and ignore the reduce_op
+        group_name = self.coalescing_group.get_name()
+        colls = self.coalescing_group.coalescing_ops
+
+        reduce_op = colls[0].reduce_op
+        wrapper.writeline(
+            f"{output_name}_work = dist.all_reduce_coalesced("
+            f"{group_name}_buffers, "
+            f"op=_str_to_reduce_op('{str(reduce_op)}'), "
+            f"group={output_name}_pg, "
+            "async_op=True)"
+        )
+
+        coll_zero = colls[0].get_name()
+        wrapper.writeline(
+            f"_register_tensor_work({coll_zero}, {output_name}_work, {len(colls)})"
+        )
+        for col in colls:
+            wrapper.writeline(
+                f"_register_wrapper_tensor({col.get_name()}, {coll_zero})"
+            )
+
+        wrapper.writeline(f"{output_name} = None")
 
     @classmethod
     def create(
-        cls,
-        collective_tensors: List["TensorBox"],
-        coalescing_group: "TensorBox"
+        cls, collective_tensors: List["TensorBox"], coalescing_group: "TensorBox"
     ):
-        layout=FlexibleLayout(
+        layout = FlexibleLayout(
             device=collective_tensors[0].get_device(),
             dtype=collective_tensors[0].get_dtype(),
-            size=[0]
+            size=[0],
         ).as_fixed()
 
         return EndCoalescing(
-            layout=layout,
-            inputs=collective_tensors, 
-            coalescing_group=coalescing_group
+            layout=layout, inputs=collective_tensors, coalescing_group=coalescing_group
         )
-

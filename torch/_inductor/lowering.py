@@ -3942,7 +3942,6 @@ try:
         V.graph.coalescing_group = None
         return TensorBox.create(result)
 
-
 except ImportError:
     log.info(
         "Inductor support for distributed collectives depends on building torch.distributed"
