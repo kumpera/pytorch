@@ -106,6 +106,11 @@ def _create_store_from_options(backend_options, rank):
     store, _, _ = next(_rendezvous_helper(backend_options.init_method, rank, None))
     return store
 
+def create_store_from_url(url):
+    store, _, _ = next(_rendezvous_helper(url, -1, -1))
+    return store
+
+
 
 def _rendezvous_error(msg):
     return ValueError("Error initializing torch.distributed using " + msg)

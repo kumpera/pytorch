@@ -1305,7 +1305,8 @@ Example::
           py::arg("timeout") =
               std::chrono::milliseconds(::c10d::Store::kDefaultTimeout),
           py::arg("wait_for_workers") = true,
-          py::arg("multi_tenant") = false)
+          py::arg("multi_tenant") = false,
+          py::call_guard<py::gil_scoped_release>())
       .def_property_readonly(
           "host",
           &::c10d::TCPStore::getHost,
@@ -2448,6 +2449,20 @@ static PyMethodDef methods[] = { // NOLINT
 
 PyMethodDef* python_functions() {
   return methods;
+}
+
+c10::intrusive_ptr<::c10d::Store> create_store_from_url(
+    const std::string &name) {
+    try {
+        pybind11::gil_scoped_acquire gil;
+        py::object dist_r = py::module_::import("torch.distributed");
+        py::object fun = dist_r.attr("create_store_from_url");
+        py::object res = fun(name);
+        return py::cast<c10::intrusive_ptr<::c10d::Store>>(res);
+    } catch (std::exception &ex) {
+        printf("outch %s\n", ex.what());
+        throw ex;
+    }
 }
 
 } // namespace c10d

@@ -73,9 +73,10 @@ if is_available():
     )
 
     from .rendezvous import (
-        rendezvous,
+        rendezvous, # this import makes the rendezvous module invisible to users
         _create_store_from_options,
         register_rendezvous_handler,
+        create_store_from_url
     )
 
     from .remote_device import _remote_device

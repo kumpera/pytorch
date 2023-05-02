@@ -104,4 +104,15 @@ class TORCH_API Store : public torch::CustomClassHolder {
   std::chrono::milliseconds timeout_;
 };
 
+
+
 } // namespace c10d
+
+namespace torch {
+namespace distributed {
+namespace c10d {
+
+TORCH_API c10::intrusive_ptr<::c10d::Store> create_store_from_url(
+    const std::string &name);
+
+} } } //namespace torch::distributed::c10d
