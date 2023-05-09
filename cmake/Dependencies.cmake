@@ -1372,6 +1372,52 @@ if(USE_CUDA)
   endif()
 endif()
 
+if(USE_LIBUV)
+  set(uv_VERSION "1.41.0")
+  set(uv_LIBRARY_DIRS "submodule")
+  set(libuv_DIR ${CMAKE_CURRENT_LIST_DIR}/../third_party/libuv)
+  add_subdirectory(${libuv_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/../third_party/libuv
+    EXCLUDE_FROM_ALL)
+
+  # This hack duplicates the `uv_a` target, so that we can call
+  # install(TARGETS ... EXPORT) on it, which is not possible when the target is
+  # defined in a subdirectory in CMake 3.5.
+  get_target_property(_uv_sources uv_a SOURCES)
+  set(_uv_sources_abs)
+  foreach(_uv_src ${_uv_sources})
+    list(APPEND _uv_sources_abs "${libuv_DIR}/${_uv_src}")
+  endforeach()
+
+  add_library(torch_uv STATIC ${_uv_sources_abs})
+  if(BUILD_SHARED_LIBS)
+    set_target_properties(torch_uv PROPERTIES POSITION_INDEPENDENT_CODE 1)
+  endif()
+
+  get_target_property(_link_libs uv_a LINK_LIBRARIES)
+  target_link_libraries(torch_uv PRIVATE ${_link_libs})
+
+  get_target_property(_include_dirs uv_a INCLUDE_DIRECTORIES)
+  target_include_directories(torch_uv PRIVATE ${_include_dirs})
+  target_include_directories(torch_uv PUBLIC $<BUILD_INTERFACE:${libuv_DIR}/include>)
+
+  get_target_property(_compile_definitions uv_a COMPILE_DEFINITIONS)
+  target_compile_definitions(torch_uv PRIVATE ${_compile_definitions})
+
+  get_target_property(_compile_options uv_a COMPILE_OPTIONS)
+  target_compile_options(torch_uv PRIVATE ${_compile_options})
+
+  install(TARGETS torch_uv
+          EXPORT TensorpipeTargets
+          ARCHIVE DESTINATION ${TP_INSTALL_LIBDIR})
+
+  add_library(uv::uv ALIAS torch_uv)
+  add_compile_options(-DTORCH_USE_LIBUV)
+
+  include_directories(BEFORE SYSTEM ${CMAKE_CURRENT_LIST_DIR}/../third_party/libuv/include)
+
+endif()
+
 if(USE_DISTRIBUTED AND USE_TENSORPIPE)
   if(MSVC)
     message(WARNING "Tensorpipe cannot be used on Windows.")
@@ -1380,7 +1426,10 @@ if(USE_DISTRIBUTED AND USE_TENSORPIPE)
       set(TP_USE_CUDA ON CACHE BOOL "" FORCE)
       set(TP_ENABLE_CUDA_IPC ON CACHE BOOL "" FORCE)
     endif()
-    set(TP_BUILD_LIBUV ON CACHE BOOL "" FORCE)
+    # TODO move this to top level and share 
+    if(NOT USE_LIBUV)
+      set(TP_BUILD_LIBUV ON CACHE BOOL "" FORCE)
+    endif()
     set(TP_STATIC_OR_SHARED STATIC CACHE STRING "" FORCE)
 
     # Tensorpipe uses cuda_add_library
@@ -1397,6 +1446,7 @@ if(USE_DISTRIBUTED AND USE_TENSORPIPE)
     endif()
   endif()
 endif()
+
 
 if(USE_GLOO)
   if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -1416,7 +1466,7 @@ if(USE_GLOO)
       set(ENV{GLOO_ROCM_ARCH} "${PYTORCH_ROCM_ARCH}")
     endif()
     if(NOT USE_SYSTEM_GLOO)
-      if(USE_DISTRIBUED AND USE_TENSORPIPE)
+      if(USE_DISTRIBUTED AND USE_TENSORPIPE)
         get_target_property(_include_dirs uv_a INCLUDE_DIRECTORIES)
         set_target_properties(uv_a PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${_include_dirs}")
       endif()

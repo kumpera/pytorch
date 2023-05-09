@@ -332,6 +332,10 @@ cmake_dependent_option(
 cmake_dependent_option(
     USE_TENSORPIPE "Use TensorPipe. Only available if USE_DISTRIBUTED is on." ON
     "USE_DISTRIBUTED" OFF)
+cmake_dependent_option(
+    USE_LIBUV "Use libuv with gloo and tcpstore. Only available if USE_DISTRIBUTED is on." ON
+    "USE_DISTRIBUTED" OFF)
+  
 option(USE_TBB "Use TBB (Deprecated)" OFF)
 cmake_dependent_option(
     USE_SYSTEM_TBB "Use system-provided Intel TBB." OFF "USE_TBB" OFF)
@@ -706,6 +710,7 @@ if(USE_FBGEMM AND ((CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_SIZEOF_VO
 endif()
 
 set(BUILD_ONEDNN_GRAPH OFF)
+
 
 include(cmake/Dependencies.cmake)
 

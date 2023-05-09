@@ -536,6 +536,7 @@ class build_ext(setuptools.command.build_ext.build_ext):
                 report('  -- USE_TENSORPIPE={}'.format(cmake_cache_vars['USE_TENSORPIPE']))
                 report('  -- USE_GLOO={}'.format(cmake_cache_vars['USE_GLOO']))
                 report('  -- USE_MPI={}'.format(cmake_cache_vars['USE_OPENMPI']))
+                report('  -- USE_LIBUV={}'.format(cmake_cache_vars['USE_LIBUV']))
         else:
             report('-- Building without distributed package')
         if cmake_cache_vars['STATIC_DISPATCH_BACKEND']:

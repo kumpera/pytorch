@@ -29,6 +29,20 @@ namespace c10d {
 namespace detail {
 namespace {
 
+#ifdef TORCH_USE_LIBUV
+
+#include <uv.h>
+class LibUVStore {
+  uv_loop_t loop;
+public:
+  LibUVStore() {
+    uv_loop_init(&loop);
+  }
+
+};
+#else
+#endif
+
 // Abstract base class to handle thread state for TCPStoreMasterDaemon and
 // TCPStoreWorkerDaemon. Contains the windows/unix implementations to signal a
 // shutdown sequence for the thread
