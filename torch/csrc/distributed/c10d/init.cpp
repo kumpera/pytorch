@@ -649,7 +649,16 @@ An enum-like class for built-in communication hooks: ``ALLREDUCE`` and ``FP16_CO
           "set_debug_level_from_env",
           ::c10d::setDebugLevelFromEnvironment,
           R"(Sets the debug level of the torch.distributed package from the
-          ``TORCH_DISTRIBUTED_DEBUG`` environment variable.)");
+          ``TORCH_DISTRIBUTED_DEBUG`` environment variable.)")
+      .def(
+          "create_batched_collective",
+          [](const std::vector<int>& collectives,
+             const std::vector<::c10d::ReduceOp>& reduceOps)
+              -> c10::intrusive_ptr<::c10d::CollectivesBatch> {
+            return c10::make_intrusive<::c10d::CollectivesBatch>(
+                collectives, reduceOps);
+          },
+          R"(Experimental feature. Create a batched collective object.)");
 
   // TODO(crcrpar): Hardening `ReduceOp`.
   //    While keeping most op types as enum value,
@@ -1335,6 +1344,11 @@ Arguments:
           &::c10d::PrefixStore::getUnderlyingStore,
           R"(Gets the underlying store object that PrefixStore wraps around.)");
 
+  auto colsBatch =
+      py::class_<
+          ::c10d::CollectivesBatch,
+          c10::intrusive_ptr<::c10d::CollectivesBatch>>(module, "CollectivesBatch");
+
   auto processGroup =
       py::class_<
           ::c10d::ProcessGroup,
@@ -1644,6 +1658,12 @@ Arguments:
                 return self->getBackend(device.type());
               },
               py::arg("device"),
+              py::call_guard<py::gil_scoped_release>())
+          .def(
+              "batch_execute",
+              &::c10d::ProcessGroup::batchExecute,
+              py::arg("batch"),
+              py::arg("tensors"),
               py::call_guard<py::gil_scoped_release>());
 
   py::enum_<::c10d::ProcessGroup::BackendType>(processGroup, "BackendType")

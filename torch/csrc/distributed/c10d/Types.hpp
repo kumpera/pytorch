@@ -167,4 +167,20 @@ struct DistributedBackendOptions {
   std::vector<int64_t> global_ranks_in_group;
 };
 
+// Keep in sync with distributed_c10.py :: _CollectiveId
+enum CollType : uint8_t {
+  ALL_REDUCE = 0,
+  ALL_GATHER = 1,
+  REDUCE_SCATTER = 2,
+};
+
+struct CollectivesBatch: torch::CustomClassHolder {
+  std::vector<int> collectives;
+  std::vector<ReduceOp> reduceOps;
+
+  explicit CollectivesBatch(
+    const std::vector<int>& collectives,
+    const std::vector<ReduceOp>& reduceOps): collectives(collectives), reduceOps(reduceOps) {}
+};
+
 } // namespace c10d

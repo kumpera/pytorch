@@ -153,4 +153,48 @@ void ProcessGroup::init() {
   C10_LOG_API_USAGE_ONCE(
       fmt::format("c10d.process_group_{}", getBackendName()));
 }
+
+std::vector<c10::intrusive_ptr<Work>> ProcessGroup::batchExecute(
+    const c10::intrusive_ptr<CollectivesBatch>& batch,
+    std::vector<at::Tensor>& tensors) {
+  // TODO do some validation prior to starting
+  // TODO timeout
+
+  int param_idx = 0;
+  std::vector<c10::intrusive_ptr<Work>> result;
+  result.reserve(batch->collectives.size());
+  std::vector<at::Tensor> input_tensors;
+
+  for (const auto i : c10::irange(batch->collectives.size())) {
+    switch (batch->collectives[i]) {
+      case CollType::ALL_REDUCE: {
+        input_tensors.resize(1);
+        input_tensors[0] = tensors[param_idx];
+
+        AllreduceOptions opts{};
+        opts.reduceOp = batch->reduceOps[i];
+
+        result.emplace_back(this->allreduce(input_tensors, opts));
+        ++param_idx;
+        break;
+      }
+      case CollType::ALL_GATHER: {
+        AllgatherOptions opts{};
+        result.emplace_back(this->_allgather_base(
+            tensors[param_idx], tensors[param_idx + 1], opts));
+        param_idx += 2;
+        break;
+      }
+      case CollType::REDUCE_SCATTER: {
+        ReduceScatterOptions opts{};
+        result.emplace_back(this->_reduce_scatter_base(
+            tensors[param_idx], tensors[param_idx + 1], opts));
+        param_idx += 2;
+        break;
+      }
+    }
+  }
+  return result;
+}
+
 } // namespace c10d

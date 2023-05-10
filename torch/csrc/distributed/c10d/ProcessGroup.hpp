@@ -536,6 +536,14 @@ class TORCH_API ProcessGroup : public torch::CustomClassHolder {
         opts.timeout.count());
   }
 
+  // BAD INTERFACE WARNING
+  // it returns either 1 on N Work instances
+  // should be a single future object and that's it
+  virtual std::vector<c10::intrusive_ptr<Work>> batchExecute(
+    const c10::intrusive_ptr<CollectivesBatch> &batch,
+    std::vector<at::Tensor> &tensors);
+
+
   c10::intrusive_ptr<Options> getOptions() {
     return options_;
   }

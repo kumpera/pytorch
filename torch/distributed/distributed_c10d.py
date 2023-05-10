@@ -31,7 +31,8 @@ from torch._C._distributed_c10d import (
     Store,
     DebugLevel,
     get_debug_level,
-    Work
+    Work,
+    create_batched_collective
 )
 from torch.autograd.profiler import record_function
 from .constants import default_pg_timeout
@@ -4116,6 +4117,55 @@ def _get_group_tag(pg: ProcessGroup) -> str:
     if tag.startswith("user:"):
         tag = tag[5:]
     return tag
+
+
+
+
+# TODO Enum'ify
+# Keep in sync with Types.hpp / CollType
+class _CollectiveId:
+    ALL_REDUCE = 0
+    ALL_GATHER = 0
+    REDUCE_SCATTER = 0
+
+class _CollectiveBatcherBuilder:
+    """
+    This collect enough info about collectives and then execute them in batch.
+    TODO:
+    Pass info that might be useful when figuring out what to do:
+        (optional) pass arg shapes
+        (optional) pass input buffers if they can be baked ins
+    """
+    def __init__(self):
+        self.colls = []
+        self.reduce_ops = []
+        self.param_idx = 0
+
+    def all_reduce(self, reduce_op: ReduceOp):
+        """ returns (tensor_idx, )"""
+        self.colls.append(_CollectiveId.ALL_REDUCE)
+        self.reduce_ops.append(reduce_op)
+        res = (self.param_idx, )
+        self.param_idx += 1
+        return res
+
+    def all_gather_into_tensor(self):
+        self.colls.append(_CollectiveId.ALL_GATHER)
+        # this is ignored but array sizes much match
+        self.reduce_ops.append(ReduceOp.SUM)
+        res = (self.param_idx, self.param_idx + 1)
+        self.param_idx += 2
+        return res
+
+    def reduce_scatter_tensor(self, reduce_op: ReduceOp):
+        self.colls.append(_CollectiveId.REDUCE_SCATTER)
+        self.reduce_ops.append(reduce_op)
+        res = (self.param_idx, self.param_idx + 1)
+        self.param_idx += 2
+        return res
+
+    def build(self):
+        return create_batched_collective(self.colls, self.reduce_ops)
 
 
 # This ops are not friently to TorchDynamo. So, we decide to disallow these ops
