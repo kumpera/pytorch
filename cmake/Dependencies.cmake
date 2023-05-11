@@ -1376,6 +1376,8 @@ if(USE_LIBUV)
   set(uv_VERSION "1.41.0")
   set(uv_LIBRARY_DIRS "submodule")
   set(libuv_DIR ${CMAKE_CURRENT_LIST_DIR}/../third_party/libuv)
+  set(LIBUV_BUILD_TESTS OFF)
+  list(APPEND uv_cflags -fPIC)  
   add_subdirectory(${libuv_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/../third_party/libuv
     EXCLUDE_FROM_ALL)
@@ -1403,9 +1405,11 @@ if(USE_LIBUV)
 
   get_target_property(_compile_definitions uv_a COMPILE_DEFINITIONS)
   target_compile_definitions(torch_uv PRIVATE ${_compile_definitions})
+  message(STATUS "lol ${_compile_definitions}")
 
   get_target_property(_compile_options uv_a COMPILE_OPTIONS)
-  target_compile_options(torch_uv PRIVATE ${_compile_options})
+  target_compile_options(torch_uv PRIVATE ${_compile_options} -fPIC)
+  message(STATUS "haha ${_compile_options}")
 
   install(TARGETS torch_uv
           EXPORT TensorpipeTargets
