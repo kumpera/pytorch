@@ -1408,12 +1408,13 @@ if(USE_LIBUV)
   message(STATUS "lol ${_compile_definitions}")
 
   get_target_property(_compile_options uv_a COMPILE_OPTIONS)
-  target_compile_options(torch_uv PRIVATE ${_compile_options} -fPIC)
+  # target_compile_options(torch_uv PRIVATE ${_compile_options} -fPIC)
+  target_compile_options(torch_uv PRIVATE ${_compile_options})
   message(STATUS "haha ${_compile_options}")
 
   install(TARGETS torch_uv
-          EXPORT TensorpipeTargets
-          ARCHIVE DESTINATION ${TP_INSTALL_LIBDIR})
+          EXPORT TorchTargets
+          ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
   add_library(uv::uv ALIAS torch_uv)
   add_compile_options(-DTORCH_USE_LIBUV)
