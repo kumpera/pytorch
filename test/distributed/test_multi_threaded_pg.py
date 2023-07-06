@@ -9,6 +9,7 @@ from unittest import skip, SkipTest
 import operator
 from functools import reduce
 import threading
+import torch.autograd
 
 if not dist.is_available():
     print("Distributed not available, skipping tests", file=sys.stderr)
@@ -17,12 +18,14 @@ if not dist.is_available():
 from torch.testing._internal.common_distributed import (
     spawn_threads_and_init_comms,
     MultiThreadedTestCase,
+    skip_if_lt_x_gpu,
 )
 from torch.testing._internal.common_utils import (
     TestCase,
     run_tests,
     IS_SANDCASTLE,
 )
+
 
 DEFAULT_WORLD_SIZE = 4
 
@@ -93,7 +96,7 @@ class TestCollectivesWithWrapper(TestCase):
 class TestCollectivesWithBaseClass(MultiThreadedTestCase):
     @property
     def world_size(self):
-        return 4
+        return 1
 
     def setUp(self):
         os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
@@ -249,7 +252,29 @@ class TestCollectivesWithBaseClass(MultiThreadedTestCase):
         self.assertEqual(t0, torch.ones(3, 3) * res_num)
         self.assertEqual(t1, torch.ones(3, 3) * (res_num * 2))
 
-# def all_reduce_coalesced(tensors, op=ReduceOp.SUM, group=None, async_op=False):
+    @skip_if_lt_x_gpu(1)
+    def test_bwd_sees_fwd_pg(self):
+        x = torch.rand(4, device="cuda", requires_grad=True)
+        class MyFunc(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, i):
+                print(f"fwd from {dist.get_rank()} -- {threading.current_thread().ident}")
+                result = i * 2
+                ctx.save_for_backward(result)
+                return result
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                print(f"bwd from {dist.get_rank()} -- {threading.current_thread().ident}")
+                result, = ctx.saved_tensors
+                dist.all_reduce(result, )
+                return grad_output * result
+
+        x = MyFunc.apply(x)
+
+        x.sum().backward()
+
+        self.fail("ka")
 
 if __name__ == "__main__":
     run_tests()

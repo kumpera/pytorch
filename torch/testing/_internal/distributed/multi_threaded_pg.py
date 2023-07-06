@@ -389,13 +389,23 @@ class WorldData:
     pg_default_device: Dict[dist.ProcessGroup, torch.device]
 
 
+MTPG_TLS_KEY = "__ThreadLocalWorld"
 class ThreadLocalWorld:
     _world = threading.local()
 
     def _get_world(self) -> WorldData:
+        print("_get_world")
+        # torch._C._stash_obj_in_tls("my_obj", local.my_obj)
+        if torch._C._is_key_in_tls(MTPG_TLS_KEY):
+            return torch._C._get_obj_in_tls(MTPG_TLS_KEY)
         if not hasattr(ThreadLocalWorld._world, "world"):
-            ThreadLocalWorld._world.world = WorldData(None, {}, {}, {}, {}, 0, {}, {}, {}, {})
-        return ThreadLocalWorld._world.world
+            obj = WorldData(None, {}, {}, {}, {}, 0, {}, {}, {}, {})
+            ThreadLocalWorld._world.world = obj
+            torch._C._stash_obj_in_tls(MTPG_TLS_KEY, obj)
+        res = ThreadLocalWorld._world.world
+        print("res worked")
+        print(f">>> {type(res)}")
+        return res
 
     @property
     def default_pg(self):
