@@ -45,6 +45,9 @@ class TORCH_API Backend : public torch::CustomClassHolder {
   explicit Backend(int rank, int size);
   ~Backend() override = 0;
 
+  void registerForDebug(c10::intrusive_ptr<::c10d::Store> store, const std::string pg_name);
+  void emitEvent(const std::string &event, const std::vector<uint8_t>& data);
+
   int getRank() const {
     return rank_;
   }
@@ -332,6 +335,9 @@ class TORCH_API Backend : public torch::CustomClassHolder {
   // Debug level setting. It is parsed once when ProcessGroup is constructed and
   // remains the same across use of this process group.
   DebugLevel dist_debug_level_;
+
+  c10::intrusive_ptr<::c10d::Store> debug_store_;
+  std::string debug_pg_name_;
 };
 
 } // namespace c10d

@@ -62,6 +62,7 @@ _MPI_AVAILABLE = True
 _NCCL_AVAILABLE = True
 _GLOO_AVAILABLE = True
 _UCC_AVAILABLE = True
+_DONT_LOOK_AT_ME = "___DONT_LOOK_AT_ME__"
 
 _pickler = pickle.Pickler
 _unpickler = pickle.Unpickler
@@ -1105,6 +1106,15 @@ def init_process_group(
     else:
         backend = Backend("undefined")
 
+    if _DONT_LOOK_AT_ME not in _world.pg_map:
+        _world.pg_map[_DONT_LOOK_AT_ME] = torch._C._distributed_c10d.TCPStore(
+            host_name="localhost",
+            port=19876,
+            world_size=world_size,
+            is_master=rank == 0,
+            dbg_hack=True
+        )
+
     """
     Group name is not visible to users unless they access
     internals of c10d. This means we can ignore the value
@@ -1311,6 +1321,7 @@ def _new_process_group_helper(
 
         # Process group wrapper initialization for supported PGs when TORCH_DISTRIBUTED_DEBUG is set
         if backend_str in [Backend.GLOO, Backend.NCCL, Backend.UCC]:
+            backend_class.register_dbg(_world.pg_map[_DONT_LOOK_AT_ME], group_name)
             # In debug mode and if GLOO is available, wrap in a wrapper PG that
             # enables enhanced collective checking for debuggability.
             if get_debug_level() == DebugLevel.DETAIL:

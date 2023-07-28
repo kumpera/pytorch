@@ -312,13 +312,15 @@ ProcessGroupNCCL::WorkNCCL::WorkNCCL(
     int rank,
     OpType opType,
     uint64_t seq,
+    c10::weak_intrusive_ptr<Backend> backend,
     const char* profilingTitle,
     const c10::optional<std::vector<at::Tensor>>& inputs,
     bool desyncDebug)
     : Work(rank, opType, profilingTitle, inputs),
       devices_(devices),
       workStartTime_(std::chrono::steady_clock::now()),
-      seq_(seq) {
+      seq_(seq),
+      backend_(backend) {
   // Creates the CUDA event wrappers
   // Note: The actual events are lazily created when first recorded to with
   // DEFAULT_FLAGS = cudaEventDisableTiming.
@@ -345,7 +347,8 @@ ProcessGroupNCCL::WorkNCCL::WorkNCCL(const WorkNCCL& w)
       startTraceUpdated_(w.startTraceUpdated_),
       numelIn_(w.numelIn_),
       numelOut_(w.numelOut_),
-      store_(w.store_) {
+      store_(w.store_),
+      backend_(w.backend_) {
   exception_ = w.exception_;
 }
 
@@ -860,6 +863,16 @@ void ProcessGroupNCCL::logWorkStart(WorkNCCL& work) {
   work.startTraceUpdated_ = true;
   storeError_ = !c10d::traceUpdate(
       store_, traceKeyStart_, work.seq_, opTypeToString(work.opType_));
+
+  // XXXX big hack, we should use something smarter
+  std::stringstream ss;
+  ss << work.seq_ << "#" << opTypeToString(work.opType_);
+
+  auto xx = ss.str();
+  std::vector<uint8_t> bla;
+  bla.insert(bla.end(), xx.begin(), xx.end());
+
+  emitEvent("col-start", bla);
 }
 
 void ProcessGroupNCCL::logWorkEnd(WorkNCCL& work) {
@@ -873,6 +886,16 @@ void ProcessGroupNCCL::logWorkEnd(WorkNCCL& work) {
 
   storeError_ = !c10d::traceUpdate(
       store_, traceKeyEnd_, work.seq_, opTypeToString(work.opType_));
+
+  // XXXX big hack, we should use something smarter
+  std::stringstream ss;
+  ss << work.seq_ << "#" << opTypeToString(work.opType_);
+
+  auto xx = ss.str();
+  std::vector<uint8_t> bla;
+  bla.insert(bla.end(), xx.begin(), xx.end());
+
+  emitEvent("col-end", bla);
 }
 
 void ProcessGroupNCCL::workCleanupLoop() {
@@ -1390,7 +1413,15 @@ c10::intrusive_ptr<ProcessGroupNCCL::WorkNCCL> ProcessGroupNCCL::initWork(
     const char* profilingTitle,
     const c10::optional<std::vector<at::Tensor>>& inputs) {
   return c10::make_intrusive<ProcessGroupNCCL::WorkNCCL>(
-      devices, rank, opType, seq_, profilingTitle, inputs, desyncDebug_);
+      devices,
+      rank,
+      opType,
+      seq_,
+      c10::weak_intrusive_ptr<Backend>(
+          c10::intrusive_ptr<Backend>::unsafe_reclaim_from_nonowning(this)),
+      profilingTitle,
+      inputs,
+      desyncDebug_);
 }
 
 std::vector<at::Tensor> ProcessGroupNCCL::WorkNCCL::result() {

@@ -1302,7 +1302,8 @@ Example::
                       bool waitWorkers,
                       bool multiTenant,
                       c10::optional<int> masterListenFd,
-                      bool useLibUV) {
+                      bool useLibUV,
+                      bool dbgServerHack) {
             c10::optional<std::size_t> numWorkers = c10::nullopt;
             if (worldSize.has_value() && worldSize.value() > -1) {
               numWorkers = static_cast<std::size_t>(worldSize.value());
@@ -1316,7 +1317,8 @@ Example::
                 timeout,
                 multiTenant,
                 masterListenFd,
-                useLibUV};
+                useLibUV,
+                dbgServerHack};
 
             return c10::make_intrusive<::c10d::TCPStore>(host, opts);
           }),
@@ -1332,6 +1334,7 @@ Example::
           py::arg("multi_tenant") = false,
           py::arg("master_listen_fd") = py::none(),
           py::arg("use_libuv") = false,
+          py::arg("dbg_hack") = false,
           py::call_guard<py::gil_scoped_release>())
       .def_property_readonly(
           "host",
@@ -1749,6 +1752,10 @@ options :class:`~torch.distributed.ProcessGroupNCCL.Options`).
           .def("rank", &::c10d::Backend::getRank)
           .def("size", &::c10d::Backend::getSize)
           .def("name", &::c10d::Backend::getBackendName)
+          .def(
+              "register_dbg",
+              &::c10d::Backend::registerForDebug,
+              py::call_guard<py::gil_scoped_release>())
           .def(
               "broadcast",
               &::c10d::Backend::broadcast,

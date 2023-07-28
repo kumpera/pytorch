@@ -40,6 +40,8 @@ struct TCPStoreOptions {
 
   // A boolean value indicating whether to use the experimental libUV backend.
   bool useLibUV = false;
+
+  bool dbgServerHack = false;
 };
 
 class TORCH_API TCPStore : public Store {
