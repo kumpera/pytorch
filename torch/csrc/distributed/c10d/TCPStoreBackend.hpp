@@ -61,6 +61,7 @@ class BackgroundThread {
 
 std::unique_ptr<BackgroundThread> create_tcpstore_backend(const TCPStoreOptions& opts);
 std::unique_ptr<BackgroundThread> create_libuv_tcpstore_backend(const TCPStoreOptions& opts);
+std::unique_ptr<BackgroundThread> create_dbg_server_backend(const TCPStoreOptions& opts);
 bool is_libuv_tcpstore_backend_available();
 
 } // namespace detail

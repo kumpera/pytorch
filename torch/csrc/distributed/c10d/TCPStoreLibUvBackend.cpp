@@ -266,32 +266,32 @@ class ChunkedStream {
   }
 };
 
-class LibUVStoreDaemon : public BackgroundThread {
+class ServiceBase : public BackgroundThread {
  public:
-  explicit LibUVStoreDaemon(int port);
-  ~LibUVStoreDaemon() override;
+  explicit ServiceBase(int port);
+  ~ServiceBase() override;
 
   uint16_t port() const override;
 
-  void set(const std::string& key, const std::vector<uint8_t>& value);
-  const std::vector<uint8_t>& compareAndSet(
+  uint16_t get_socket_port(uv_tcp_t* handle);
+  void init(const TCPStoreOptions& opts);
+
+  virtual void set(const std::string& key, const std::vector<uint8_t>& value) = 0;
+  virtual const std::vector<uint8_t>& compareAndSet(
       const std::string& key,
       const std::vector<uint8_t>& expectedValue,
-      const std::vector<uint8_t>& newValue);
-  const std::vector<uint8_t>& get(const std::string& key);
-  int64_t add(const std::string& key, int64_t addVal);
-  bool checkKeys(const std::vector<std::string>& keys);
-  bool waitKeys(const std::vector<std::string>& keys, UvHandle* client);
-  int64_t size();
-  int64_t deleteKey(const std::string& key);
-  void append(const std::string& key, const std::vector<uint8_t>& value);
+      const std::vector<uint8_t>& newValue)  = 0;
+  virtual const std::vector<uint8_t>& get(const std::string& key)  = 0;
+  virtual int64_t add(const std::string& key, int64_t addVal)  = 0;
+  virtual bool checkKeys(const std::vector<std::string>& keys)  = 0;
+  virtual bool waitKeys(const std::vector<std::string>& keys, UvHandle* client)  = 0;
+  virtual int64_t size() = 0;
+  virtual int64_t deleteKey(const std::string& key) = 0;
+  virtual void append(const std::string& key, const std::vector<uint8_t>& value) = 0;
+  virtual void clearClientWaitState(UvHandle* client) = 0;
 
   void registerClient(UvHandle* client);
   void unregisterClient(UvHandle* client);
-  void clearClientWaitState(UvHandle* client);
-
-  uint16_t get_socket_port(uv_tcp_t* handle);
-  void init(const TCPStoreOptions& opts);
 
  protected:
   void run() override;
@@ -301,16 +301,11 @@ class LibUVStoreDaemon : public BackgroundThread {
   uv_loop_t loop;
   uv_tcp_t server;
   uv_async_t exit_handle;
-  std::unordered_map<std::string, std::vector<uint8_t>> tcpStore_;
-  // From key -> the list of UvClient waiting on the key
-  std::unordered_map<std::string, std::vector<UvHandle*>> waitingSockets_;
-  // From socket -> number of keys awaited
-  std::unordered_map<UvHandle*, size_t> keysAwaited_;
-  std::unordered_set<UvHandle*> clients_;
   int port_;
+  std::unordered_set<UvHandle*> clients_;
 
-  static LibUVStoreDaemon& from_uv(uv_handle_t* stream) {
-    return *(LibUVStoreDaemon*)uv_handle_get_data(stream);
+  static ServiceBase& from_uv(uv_handle_t* stream) {
+    return *(ServiceBase*)uv_handle_get_data(stream);
   }
 
   static void on_new_connection(uv_stream_t* server, int status) {
@@ -323,16 +318,46 @@ class LibUVStoreDaemon : public BackgroundThread {
 
   void onConnect(int status);
   void onExitRequest();
-  void wakeupWaitingClients(const std::string& key);
   bool tryListen(bool use_ipv6);
 
   static void print_active_handles(uv_handle_t* handle, void* arg);
 };
 
+class StoreService : public ServiceBase {
+public:
+  StoreService(int port);
+  ~StoreService() override;
+
+  void set(const std::string& key, const std::vector<uint8_t>& value) override;
+  const std::vector<uint8_t>& compareAndSet(
+      const std::string& key,
+      const std::vector<uint8_t>& expectedValue,
+      const std::vector<uint8_t>& newValue) override;
+  const std::vector<uint8_t>& get(const std::string& key) override;
+  int64_t add(const std::string& key, int64_t addVal) override;
+  bool checkKeys(const std::vector<std::string>& keys) override;
+  bool waitKeys(const std::vector<std::string>& keys, UvHandle* client) override;
+  int64_t size() override;
+  int64_t deleteKey(const std::string& key) override;
+  void append(const std::string& key, const std::vector<uint8_t>& value) override;
+
+protected:
+  void clearClientWaitState(UvHandle* client) override;
+private:
+  void wakeupWaitingClients(const std::string& key);
+
+  std::unordered_map<std::string, std::vector<uint8_t>> tcpStore_;
+  // From key -> the list of UvClient waiting on the key
+  std::unordered_map<std::string, std::vector<UvHandle*>> waitingSockets_;
+  // From socket -> number of keys awaited
+  std::unordered_map<UvHandle*, size_t> keysAwaited_;
+};
+
+
 class UvClient : public UvHandle {
   uv_tcp_t client;
   ChunkedStream stream;
-  LibUVStoreDaemon* store;
+  ServiceBase* store;
 
   static void read_callback(
       uv_stream_t* client,
@@ -663,7 +688,7 @@ class UvClient : public UvHandle {
   }
 
  public:
-  explicit UvClient(uv_loop_t* loop, LibUVStoreDaemon* store) : store(store) {
+  explicit UvClient(uv_loop_t* loop, ServiceBase* store) : store(store) {
     uv_tcp_init(loop, &client);
     uv_handle_set_data((uv_handle_t*)&client, this);
     C10D_DEBUG("Accepted new client: {}\n", (void*)this);
@@ -698,7 +723,7 @@ class UvClient : public UvHandle {
   }
 };
 
-void LibUVStoreDaemon::onConnect(int status) {
+void ServiceBase::onConnect(int status) {
   UvClient* client = new UvClient(&loop, this);
 
   registerClient(client);
@@ -716,13 +741,13 @@ void LibUVStoreDaemon::onConnect(int status) {
   }
 }
 
-void LibUVStoreDaemon::onExitRequest() {
+void ServiceBase::onExitRequest() {
   C10D_DEBUG("Store exit requested\n");
   uv_close((uv_handle_t*)&exit_handle, nullptr);
   uv_stop(&loop);
 }
 
-uint16_t LibUVStoreDaemon::get_socket_port(uv_tcp_t* handle) {
+uint16_t ServiceBase::get_socket_port(uv_tcp_t* handle) {
   sockaddr_storage addr_s{};
 
   int addr_len = sizeof(addr_s);
@@ -740,7 +765,7 @@ uint16_t LibUVStoreDaemon::get_socket_port(uv_tcp_t* handle) {
   }
 }
 
-void LibUVStoreDaemon::init(const TCPStoreOptions& opts) {
+void ServiceBase::init(const TCPStoreOptions& opts) {
   uv_handle_set_data((uv_handle_t*)&server, this);
 
   if (opts.masterListenFd.has_value()) {
@@ -777,7 +802,7 @@ void LibUVStoreDaemon::init(const TCPStoreOptions& opts) {
   TORCH_CHECK(false, "failed to init store, no bind possible");
 }
 
-bool LibUVStoreDaemon::tryListen(bool use_ipv6) {
+bool ServiceBase::tryListen(bool use_ipv6) {
   int res = uv_tcp_init(&loop, &server);
   struct sockaddr_storage addr;
   if (res) {
@@ -811,7 +836,7 @@ bool LibUVStoreDaemon::tryListen(bool use_ipv6) {
   res = uv_listen(
       (uv_stream_t*)&server,
       DEFAULT_BACKLOG,
-      LibUVStoreDaemon::on_new_connection);
+      ServiceBase::on_new_connection);
   if (res) {
     C10D_WARNING(
         "UV Store listen failure. ipv6:{} message:{}",
@@ -822,16 +847,16 @@ bool LibUVStoreDaemon::tryListen(bool use_ipv6) {
   return res == 0;
 }
 
-LibUVStoreDaemon::LibUVStoreDaemon(int port) : port_(port) {
+ServiceBase::ServiceBase(int port) : port_(port) {
   TORCH_CHECK(uv_loop_init(&loop) == 0, "Failed to init uv loop");
   TORCH_CHECK(
-      uv_async_init(&loop, &exit_handle, LibUVStoreDaemon::on_exit_request) ==
+      uv_async_init(&loop, &exit_handle, ServiceBase::on_exit_request) ==
           0,
       "Failed to init uv async event");
   uv_handle_set_data((uv_handle_t*)&exit_handle, this);
 }
 
-LibUVStoreDaemon::~LibUVStoreDaemon() {
+ServiceBase::~ServiceBase() {
   if (!is_running()) {
     uv_close((uv_handle_t*)&exit_handle, nullptr);
     uv_run(&loop, UV_RUN_NOWAIT);
@@ -842,11 +867,11 @@ LibUVStoreDaemon::~LibUVStoreDaemon() {
   }
 }
 
-uint16_t LibUVStoreDaemon::port() const {
+uint16_t ServiceBase::port() const {
   return port_;
 }
 
-void LibUVStoreDaemon::print_active_handles(uv_handle_t* handle, void* arg) {
+void ServiceBase::print_active_handles(uv_handle_t* handle, void* arg) {
   C10D_DEBUG(
       "UV live handle type {} active:{} is-closing:{}",
       (int)handle->type,
@@ -854,7 +879,7 @@ void LibUVStoreDaemon::print_active_handles(uv_handle_t* handle, void* arg) {
       uv_is_closing(handle));
 }
 
-void LibUVStoreDaemon::run() {
+void ServiceBase::run() {
   C10D_DEBUG("Uv main loop running");
   int res = uv_run(&loop, UV_RUN_DEFAULT);
   if (res) {
@@ -865,7 +890,7 @@ void LibUVStoreDaemon::run() {
 
   if (debug_enabled) {
     C10D_DEBUG("Walking live handles prior to closing clients");
-    uv_walk(&loop, LibUVStoreDaemon::print_active_handles, nullptr);
+    uv_walk(&loop, ServiceBase::print_active_handles, nullptr);
   }
 
   for (auto it = clients_.begin(); it != clients_.end(); ++it) {
@@ -875,7 +900,7 @@ void LibUVStoreDaemon::run() {
 
   if (debug_enabled) {
     C10D_DEBUG("Walking live handles after closing clients");
-    uv_walk(&loop, LibUVStoreDaemon::print_active_handles, nullptr);
+    uv_walk(&loop, ServiceBase::print_active_handles, nullptr);
   }
 
   while (1) {
@@ -894,7 +919,7 @@ void LibUVStoreDaemon::run() {
   C10D_INFO("uv_loop cleanup finished.");
 }
 
-void LibUVStoreDaemon::stop() {
+void ServiceBase::stop() {
   int res = uv_async_send(&exit_handle);
   if (res) {
     C10D_INFO(
@@ -905,16 +930,16 @@ void LibUVStoreDaemon::stop() {
   }
 }
 
-void LibUVStoreDaemon::registerClient(UvHandle* client) {
+void ServiceBase::registerClient(UvHandle* client) {
   clients_.insert(client);
 }
 
-void LibUVStoreDaemon::unregisterClient(UvHandle* client) {
+void ServiceBase::unregisterClient(UvHandle* client) {
   clients_.erase(client);
   clearClientWaitState(client);
 }
 
-void LibUVStoreDaemon::clearClientWaitState(UvHandle* client) {
+void StoreService::clearClientWaitState(UvHandle* client) {
   if (keysAwaited_.find(client) == keysAwaited_.end()) {
     return;
   }
@@ -935,7 +960,7 @@ void LibUVStoreDaemon::clearClientWaitState(UvHandle* client) {
   }
 }
 
-void LibUVStoreDaemon::set(
+void StoreService::set(
     const std::string& key,
     const std::vector<uint8_t>& value) {
   tcpStore_[key] = value;
@@ -943,7 +968,7 @@ void LibUVStoreDaemon::set(
   wakeupWaitingClients(key);
 }
 
-const std::vector<uint8_t>& LibUVStoreDaemon::compareAndSet(
+const std::vector<uint8_t>& StoreService::compareAndSet(
     const std::string& key,
     const std::vector<uint8_t>& expectedValue,
     const std::vector<uint8_t>& newValue) {
@@ -969,12 +994,12 @@ const std::vector<uint8_t>& LibUVStoreDaemon::compareAndSet(
   }
 }
 
-const std::vector<uint8_t>& LibUVStoreDaemon::get(const std::string& key) {
+const std::vector<uint8_t>& StoreService::get(const std::string& key) {
   static std::vector<uint8_t> missing_key;
   return tcpStore_.count(key) ? tcpStore_.at(key) : missing_key;
 }
 
-int64_t LibUVStoreDaemon::add(const std::string& key, int64_t addVal) {
+int64_t StoreService::add(const std::string& key, int64_t addVal) {
   std::vector<uint8_t> oldData;
   auto it = tcpStore_.find(key);
   if (it != tcpStore_.end()) {
@@ -994,13 +1019,13 @@ int64_t LibUVStoreDaemon::add(const std::string& key, int64_t addVal) {
   return addVal;
 }
 
-bool LibUVStoreDaemon::checkKeys(const std::vector<std::string>& keys) {
+bool StoreService::checkKeys(const std::vector<std::string>& keys) {
   return std::all_of(keys.begin(), keys.end(), [&](const std::string& s) {
     return tcpStore_.count(s) > 0;
   });
 }
 
-bool LibUVStoreDaemon::waitKeys(
+bool StoreService::waitKeys(
     const std::vector<std::string>& keys,
     UvHandle* client) {
   if (checkKeys(keys)) {
@@ -1018,15 +1043,15 @@ bool LibUVStoreDaemon::waitKeys(
   return false;
 }
 
-int64_t LibUVStoreDaemon::size() {
+int64_t StoreService::size() {
   return tcpStore_.size();
 }
 
-int64_t LibUVStoreDaemon::deleteKey(const std::string& key) {
+int64_t StoreService::deleteKey(const std::string& key) {
   return tcpStore_.erase(key);
 }
 
-void LibUVStoreDaemon::append(
+void StoreService::append(
     const std::string& key,
     const std::vector<uint8_t>& value) {
   std::vector<uint8_t> oldData;
@@ -1041,7 +1066,7 @@ void LibUVStoreDaemon::append(
   wakeupWaitingClients(key);
 }
 
-void LibUVStoreDaemon::wakeupWaitingClients(const std::string& key) {
+void StoreService::wakeupWaitingClients(const std::string& key) {
   auto socketsToWait = waitingSockets_.find(key);
   if (socketsToWait != waitingSockets_.end()) {
     for (UvHandle* client : socketsToWait->second) {
@@ -1060,7 +1085,7 @@ void LibUVStoreDaemon::wakeupWaitingClients(const std::string& key) {
 std::unique_ptr<BackgroundThread> create_libuv_tcpstore_backend(
     const TCPStoreOptions& opts) {
 #ifdef TORCH_USE_LIBUV
-  auto res = std::make_unique<LibUVStoreDaemon>(opts.port);
+  auto res = std::make_unique<StoreService>(opts.port);
   res->init(opts);
   return res;
 #else

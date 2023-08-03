@@ -312,15 +312,13 @@ ProcessGroupNCCL::WorkNCCL::WorkNCCL(
     int rank,
     OpType opType,
     uint64_t seq,
-    c10::weak_intrusive_ptr<Backend> backend,
     const char* profilingTitle,
     const c10::optional<std::vector<at::Tensor>>& inputs,
     bool desyncDebug)
     : Work(rank, opType, profilingTitle, inputs),
       devices_(devices),
       workStartTime_(std::chrono::steady_clock::now()),
-      seq_(seq),
-      backend_(backend) {
+      seq_(seq) {
   // Creates the CUDA event wrappers
   // Note: The actual events are lazily created when first recorded to with
   // DEFAULT_FLAGS = cudaEventDisableTiming.
@@ -347,8 +345,7 @@ ProcessGroupNCCL::WorkNCCL::WorkNCCL(const WorkNCCL& w)
       startTraceUpdated_(w.startTraceUpdated_),
       numelIn_(w.numelIn_),
       numelOut_(w.numelOut_),
-      store_(w.store_),
-      backend_(w.backend_) {
+      store_(w.store_) {
   exception_ = w.exception_;
 }
 
@@ -1417,8 +1414,6 @@ c10::intrusive_ptr<ProcessGroupNCCL::WorkNCCL> ProcessGroupNCCL::initWork(
       rank,
       opType,
       seq_,
-      c10::weak_intrusive_ptr<Backend>(
-          c10::intrusive_ptr<Backend>::unsafe_reclaim_from_nonowning(this)),
       profilingTitle,
       inputs,
       desyncDebug_);

@@ -110,7 +110,6 @@ class TORCH_API ProcessGroupNCCL : public Backend {
         int rank,
         OpType opType,
         uint64_t seq,
-        c10::weak_intrusive_ptr<Backend> backend,
         const char* profilingTitle = nullptr,
         const c10::optional<std::vector<at::Tensor>>& inputs = c10::nullopt,
         bool desyncDebug = false
@@ -254,8 +253,6 @@ class TORCH_API ProcessGroupNCCL : public Backend {
 
     // The future returned by getFuture.
     c10::intrusive_ptr<at::ivalue::Future> future_;
-
-    c10::weak_intrusive_ptr<Backend> backend_;
 
     friend class ProcessGroupNCCL;
   };
