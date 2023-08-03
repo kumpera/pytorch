@@ -325,8 +325,8 @@ class ServiceBase : public BackgroundThread {
 
 class StoreService : public ServiceBase {
 public:
-  StoreService(int port);
-  ~StoreService() override;
+  StoreService(int port): ServiceBase(port) {}
+  ~StoreService() override = default;
 
   void set(const std::string& key, const std::vector<uint8_t>& value) override;
   const std::vector<uint8_t>& compareAndSet(
@@ -1080,6 +1080,37 @@ void StoreService::wakeupWaitingClients(const std::string& key) {
   }
 }
 
+
+class DebugService : public ServiceBase {
+public:
+  DebugService(int port): ServiceBase(port) {}
+  ~DebugService() override = default;
+
+  void set(const std::string& key, const std::vector<uint8_t>& value) override;
+  const std::vector<uint8_t>& compareAndSet(
+      const std::string& key,
+      const std::vector<uint8_t>& expectedValue,
+      const std::vector<uint8_t>& newValue) override;
+  const std::vector<uint8_t>& get(const std::string& key) override;
+  int64_t add(const std::string& key, int64_t addVal) override;
+  bool checkKeys(const std::vector<std::string>& keys) override;
+  bool waitKeys(const std::vector<std::string>& keys, UvHandle* client) override;
+  int64_t size() override;
+  int64_t deleteKey(const std::string& key) override;
+  void append(const std::string& key, const std::vector<uint8_t>& value) override;
+
+protected:
+  void clearClientWaitState(UvHandle* client) override;
+private:
+  void wakeupWaitingClients(const std::string& key);
+
+  std::unordered_map<std::string, std::vector<uint8_t>> tcpStore_;
+  // From key -> the list of UvClient waiting on the key
+  std::unordered_map<std::string, std::vector<UvHandle*>> waitingSockets_;
+  // From socket -> number of keys awaited
+  std::unordered_map<UvHandle*, size_t> keysAwaited_;
+};
+
 #endif
 
 std::unique_ptr<BackgroundThread> create_libuv_tcpstore_backend(
@@ -1087,6 +1118,17 @@ std::unique_ptr<BackgroundThread> create_libuv_tcpstore_backend(
 #ifdef TORCH_USE_LIBUV
   auto res = std::make_unique<StoreService>(opts.port);
   res->init(opts);
+  return res;
+#else
+  TORCH_CHECK(false, "Implementation missing");
+#endif
+}
+
+std::unique_ptr<BackgroundThread> create_dbg_server_backend(
+    const TCPStoreOptions& opts) {
+#ifdef TORCH_USE_LIBUV
+  auto res = std::make_unique<DebugService>(opts.port);
+res->init(opts);
   return res;
 #else
   TORCH_CHECK(false, "Implementation missing");
