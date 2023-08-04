@@ -28,10 +28,10 @@ void Backend::registerForDebug(
   auto x = ss.str();
   debug_store_->set("register", ss.str());
   printf("registering %s\n", x.c_str());
-  std::vector<std::string> keys = {"register$" + pg_name};
+  std::vector<std::string> keys = {pg_name + "$ready"};
 
   // This is a store barrier
-  // debug_store_->wait(keys);
+  debug_store_->wait(keys);
 }
 
 void Backend::emitEvent(

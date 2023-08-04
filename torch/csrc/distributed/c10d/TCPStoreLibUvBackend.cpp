@@ -937,11 +937,8 @@ void ServiceBase::registerClient(UvHandle* client) {
 }
 
 void ServiceBase::unregisterClient(UvHandle* client) {
-  printf("unregisterClient/1 --\n");
   clients_.erase(client);
-  printf("unregisterClient/2 --\n");
   clearClientWaitState(client);
-  printf("unregisterClient/3 --\n");
 }
 
 void ServiceBase::clearClientWaitState(UvHandle* client) {
@@ -1102,10 +1099,40 @@ std::vector<std::string> split_str(const std::string &s, char del) {
     start = end + 1;
     end = s.find(del, start);
   }
+  if(start < s.size()) {
+    res.emplace_back(s.substr(start));
+  }
   return res;
 }
 
 class DebugService : public ServiceBase {
+  struct PgData {
+    int pg_size;
+    int registered_ranks;
+  };
+
+  std::unordered_map<std::string, PgData> pg_registry;
+
+  void registerPg(const std::string &pg_name, int ws, int rank) {
+    // for now, we ignore rank
+    if (pg_registry.count(pg_name) == 0) {
+      pg_registry[pg_name] = PgData { ws, 1};
+    } else {
+      pg_registry[pg_name].registered_ranks += 1;
+    }
+    printf("pg: %s ws:%d entered: %d\n", pg_name.c_str(), pg_registry[pg_name].pg_size, pg_registry[pg_name].registered_ranks);
+    if (isPgReady(pg_name)) {
+      wakeupWaitingClients("/" + pg_name + "$ready");
+    }
+  }
+
+  bool isPgReady(const std::string &pg_name) {
+    auto it = pg_registry.find(pg_name);
+    if(it == pg_registry.end()) {
+      return false;
+    }
+    return it->second.pg_size == it->second.registered_ranks;
+  }
 public:
   DebugService(int port): ServiceBase(port) {}
   ~DebugService() override = default;
@@ -1116,11 +1143,17 @@ public:
     set(pg_name $ rank $ event, payload)
     */
     if(key == "/register") {
-      printf("we got a register call for %s\n", value.data());
+      auto parts = split_str(key, '$');
+      if(parts.size() != 3) {
+        printf("we got an odd register(%zu) %s\n", parts.size(), key.c_str());
+      } else {
+        printf("we got a register call for pg:%s size:%s rank:%s\n", parts[0].c_str(), parts[1].c_str(), parts[2].c_str());
+        registerPg(parts[0].c_str(), std::stoi(parts[1]), std::stoi(parts[2]));
+      }
     } else {
       auto parts = split_str(key, '$');
       if(parts.size() != 3) {
-        printf("we got an odd event %s\n", key.c_str());
+        printf("we got an odd event(%zu) %s\n", parts.size(), key.c_str());
       } else {
         parts[0] = parts[0].substr(1);
         printf("pg %s with rank %s got event %s\n", parts[0].c_str(), parts[1].c_str(), parts[2].c_str());
@@ -1149,9 +1182,17 @@ public:
     throw new std::runtime_error("not implemented");
   }
   bool waitKeys(const std::vector<std::string>& keys, UvHandle* client) override {
-      printf("NOOOO5\n");
-    throw new std::runtime_error("not implemented");
+    bool ready = true;
+    for(auto &key : keys) {
+      printf("checking key %s for waiting\n", key.c_str());
+      if(!isPgReady(key)) {
+        ready = false;
+        registerWait(client, key);
+      }
+    }
+    return ready;
   }
+
   int64_t size() override {
       printf("NOOOO6\n");
     throw new std::runtime_error("not implemented");
@@ -1166,14 +1207,6 @@ public:
       printf("NOOOO8\n");
     throw new std::runtime_error("not implemented");
   }
-private:
-  // void wakeupWaitingClients(const std::string& key);
-
-  std::unordered_map<std::string, std::vector<uint8_t>> tcpStore_;
-  // From key -> the list of UvClient waiting on the key
-  std::unordered_map<std::string, std::vector<UvHandle*>> waitingSockets_;
-  // From socket -> number of keys awaited
-  std::unordered_map<UvHandle*, size_t> keysAwaited_;
 };
 
 #endif
