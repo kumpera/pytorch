@@ -1095,7 +1095,7 @@ std::vector<std::string> split_str(const std::string &s, char del) {
   std::string::size_type start = 0;
   auto end = s.find(del, start);
   while(end != std::string::npos) {
-    res.emplace_back(s.substr(start, end));
+    res.emplace_back(s.substr(start, end - start));
     start = end + 1;
     end = s.find(del, start);
   }
@@ -1116,21 +1116,25 @@ class DebugService : public ServiceBase {
   void registerPg(const std::string &pg_name, int ws, int rank) {
     // for now, we ignore rank
     if (pg_registry.count(pg_name) == 0) {
-      pg_registry[pg_name] = PgData { ws, 1};
+      pg_registry[pg_name] = PgData { ws, 1 };
     } else {
       pg_registry[pg_name].registered_ranks += 1;
     }
-    printf("pg: %s ws:%d entered: %d\n", pg_name.c_str(), pg_registry[pg_name].pg_size, pg_registry[pg_name].registered_ranks);
+    printf("reg done pg: %s ws:%d entered: %d\n", pg_name.c_str(), pg_registry[pg_name].pg_size, pg_registry[pg_name].registered_ranks);
     if (isPgReady(pg_name)) {
-      wakeupWaitingClients("/" + pg_name + "$ready");
+      // auto wakeUpKey = pg_name + "$ready";
+      printf("waking up all clients waiting on %s\n", pg_name.c_str());
+      wakeupWaitingClients(pg_name);
     }
   }
 
   bool isPgReady(const std::string &pg_name) {
     auto it = pg_registry.find(pg_name);
     if(it == pg_registry.end()) {
+      printf("no pg name %s\n", pg_name.c_str());
       return false;
     }
+    printf("isPgReady (%s):: size:%d rr:%d\n", pg_name.c_str(), it->second.pg_size, it->second.registered_ranks);
     return it->second.pg_size == it->second.registered_ranks;
   }
 public:
@@ -1143,12 +1147,13 @@ public:
     set(pg_name $ rank $ event, payload)
     */
     if(key == "/register") {
-      auto parts = split_str(key, '$');
+      std::string value_as_str(value.begin(), value.end());
+      auto parts = split_str(value_as_str, '$');
       if(parts.size() != 3) {
-        printf("we got an odd register(%zu) %s\n", parts.size(), key.c_str());
+        printf("we got an odd register(%zu) %s\n", parts.size(), value_as_str.c_str());
       } else {
         printf("we got a register call for pg:%s size:%s rank:%s\n", parts[0].c_str(), parts[1].c_str(), parts[2].c_str());
-        registerPg(parts[0].c_str(), std::stoi(parts[1]), std::stoi(parts[2]));
+        registerPg("/" + parts[0], std::stoi(parts[1]), std::stoi(parts[2]));
       }
     } else {
       auto parts = split_str(key, '$');
@@ -1184,10 +1189,15 @@ public:
   bool waitKeys(const std::vector<std::string>& keys, UvHandle* client) override {
     bool ready = true;
     for(auto &key : keys) {
-      printf("checking key %s for waiting\n", key.c_str());
-      if(!isPgReady(key)) {
+      auto parts = split_str(key, '$');
+      if (parts.size() != 2 || parts[1] != "ready") {
+        printf("invalid wait command %s\n", key.c_str());
+        return true;
+      }
+      printf("checking key %s for waiting => %d\n", parts[0].c_str(), isPgReady(parts[0]));
+      if(!isPgReady(parts[0])) {
         ready = false;
-        registerWait(client, key);
+        registerWait(client, parts[0]);
       }
     }
     return ready;

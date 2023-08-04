@@ -26,12 +26,12 @@ void Backend::registerForDebug(
   std::stringstream ss;
   ss << pg_name << "$" << size_ << "$" << rank_;
   auto x = ss.str();
-  debug_store_->set("register", ss.str());
   printf("registering %s\n", x.c_str());
+  debug_store_->set("register", ss.str());
   std::vector<std::string> keys = {pg_name + "$ready"};
-
   // This is a store barrier
   debug_store_->wait(keys);
+  printf("------ RANK %d IS READY for debugging!\n", rank_);
 }
 
 void Backend::emitEvent(
