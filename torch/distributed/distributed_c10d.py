@@ -1112,6 +1112,7 @@ def init_process_group(
             port=19876,
             world_size=world_size,
             is_master=rank == 0,
+            wait_for_workers=False,
             dbg_hack=True
         )
 

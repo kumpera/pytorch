@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <deque>
+#include <exception>
 #include <memory>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -288,7 +290,9 @@ class ServiceBase : public BackgroundThread {
   virtual int64_t size() = 0;
   virtual int64_t deleteKey(const std::string& key) = 0;
   virtual void append(const std::string& key, const std::vector<uint8_t>& value) = 0;
-  virtual void clearClientWaitState(UvHandle* client) = 0;
+
+  //client and wait state management
+  void clearClientWaitState(UvHandle* client);
 
   void registerClient(UvHandle* client);
   void unregisterClient(UvHandle* client);
@@ -296,6 +300,8 @@ class ServiceBase : public BackgroundThread {
  protected:
   void run() override;
   void stop() override;
+  void wakeupWaitingClients(const std::string& key);
+  void registerWait(UvHandle *client, const std::string &key);
 
  private:
   uv_loop_t loop;
@@ -303,6 +309,10 @@ class ServiceBase : public BackgroundThread {
   uv_async_t exit_handle;
   int port_;
   std::unordered_set<UvHandle*> clients_;
+  // From key -> the list of UvClient waiting on the key
+  std::unordered_map<std::string, std::vector<UvHandle*>> waitingSockets_;
+  // From socket -> number of keys awaited
+  std::unordered_map<UvHandle*, size_t> keysAwaited_;
 
   static ServiceBase& from_uv(uv_handle_t* stream) {
     return *(ServiceBase*)uv_handle_get_data(stream);
@@ -341,16 +351,8 @@ public:
   int64_t deleteKey(const std::string& key) override;
   void append(const std::string& key, const std::vector<uint8_t>& value) override;
 
-protected:
-  void clearClientWaitState(UvHandle* client) override;
 private:
-  void wakeupWaitingClients(const std::string& key);
-
   std::unordered_map<std::string, std::vector<uint8_t>> tcpStore_;
-  // From key -> the list of UvClient waiting on the key
-  std::unordered_map<std::string, std::vector<UvHandle*>> waitingSockets_;
-  // From socket -> number of keys awaited
-  std::unordered_map<UvHandle*, size_t> keysAwaited_;
 };
 
 
@@ -935,11 +937,14 @@ void ServiceBase::registerClient(UvHandle* client) {
 }
 
 void ServiceBase::unregisterClient(UvHandle* client) {
+  printf("unregisterClient/1 --\n");
   clients_.erase(client);
+  printf("unregisterClient/2 --\n");
   clearClientWaitState(client);
+  printf("unregisterClient/3 --\n");
 }
 
-void StoreService::clearClientWaitState(UvHandle* client) {
+void ServiceBase::clearClientWaitState(UvHandle* client) {
   if (keysAwaited_.find(client) == keysAwaited_.end()) {
     return;
   }
@@ -1031,16 +1036,22 @@ bool StoreService::waitKeys(
   if (checkKeys(keys)) {
     return true;
   }
-  int numKeysToAwait = 0;
   for (auto& key : keys) {
     // Only count keys that have not already been set
     if (tcpStore_.find(key) == tcpStore_.end()) {
-      waitingSockets_[key].push_back(client);
-      numKeysToAwait++;
+      registerWait(client, key);
     }
   }
-  keysAwaited_[client] = numKeysToAwait;
   return false;
+}
+
+void ServiceBase::registerWait(UvHandle *client, const std::string &key) {
+  waitingSockets_[key].push_back(client);
+  if(keysAwaited_.count(client) == 0) {
+    keysAwaited_[client] = 1;
+  } else {
+    keysAwaited_[client] += 1;
+  }
 }
 
 int64_t StoreService::size() {
@@ -1066,7 +1077,7 @@ void StoreService::append(
   wakeupWaitingClients(key);
 }
 
-void StoreService::wakeupWaitingClients(const std::string& key) {
+void ServiceBase::wakeupWaitingClients(const std::string& key) {
   auto socketsToWait = waitingSockets_.find(key);
   if (socketsToWait != waitingSockets_.end()) {
     for (UvHandle* client : socketsToWait->second) {
@@ -1081,28 +1092,82 @@ void StoreService::wakeupWaitingClients(const std::string& key) {
 }
 
 
+//XXX can we use string_view in PT?
+std::vector<std::string> split_str(const std::string &s, char del) {
+  std::vector<std::string> res;
+  std::string::size_type start = 0;
+  auto end = s.find(del, start);
+  while(end != std::string::npos) {
+    res.emplace_back(s.substr(start, end));
+    start = end + 1;
+    end = s.find(del, start);
+  }
+  return res;
+}
+
 class DebugService : public ServiceBase {
 public:
   DebugService(int port): ServiceBase(port) {}
   ~DebugService() override = default;
 
-  void set(const std::string& key, const std::vector<uint8_t>& value) override;
+  void set(const std::string& key, const std::vector<uint8_t>& value) override {
+    /* the protocol is:
+    set("register", pg_name $ pg_size $ rank)
+    set(pg_name $ rank $ event, payload)
+    */
+    if(key == "/register") {
+      printf("we got a register call for %s\n", value.data());
+    } else {
+      auto parts = split_str(key, '$');
+      if(parts.size() != 3) {
+        printf("we got an odd event %s\n", key.c_str());
+      } else {
+        parts[0] = parts[0].substr(1);
+        printf("pg %s with rank %s got event %s\n", parts[0].c_str(), parts[1].c_str(), parts[2].c_str());
+      }
+    }
+    // throw new std::runtime_error("not implemented");
+  }
+
   const std::vector<uint8_t>& compareAndSet(
       const std::string& key,
       const std::vector<uint8_t>& expectedValue,
-      const std::vector<uint8_t>& newValue) override;
-  const std::vector<uint8_t>& get(const std::string& key) override;
-  int64_t add(const std::string& key, int64_t addVal) override;
-  bool checkKeys(const std::vector<std::string>& keys) override;
-  bool waitKeys(const std::vector<std::string>& keys, UvHandle* client) override;
-  int64_t size() override;
-  int64_t deleteKey(const std::string& key) override;
-  void append(const std::string& key, const std::vector<uint8_t>& value) override;
+      const std::vector<uint8_t>& newValue) override {
+      printf("NOOOO1\n");
+    throw new std::runtime_error("not implemented");
+  }
+  const std::vector<uint8_t>& get(const std::string& key) override {
+      printf("NOOOO2\n");
+    throw new std::runtime_error("not implemented");
+  }
+  int64_t add(const std::string& key, int64_t addVal) override {
+      printf("NOOOO3\n");
+    throw new std::runtime_error("not implemented");
+  }
+  bool checkKeys(const std::vector<std::string>& keys) override {
+      printf("NOOOO4\n");
+    throw new std::runtime_error("not implemented");
+  }
+  bool waitKeys(const std::vector<std::string>& keys, UvHandle* client) override {
+      printf("NOOOO5\n");
+    throw new std::runtime_error("not implemented");
+  }
+  int64_t size() override {
+      printf("NOOOO6\n");
+    throw new std::runtime_error("not implemented");
+  }
 
-protected:
-  void clearClientWaitState(UvHandle* client) override;
+  int64_t deleteKey(const std::string& key) override {
+      printf("NOOOO7\n");
+    throw new std::runtime_error("not implemented");
+  }
+
+  void append(const std::string& key, const std::vector<uint8_t>& value) override {
+      printf("NOOOO8\n");
+    throw new std::runtime_error("not implemented");
+  }
 private:
-  void wakeupWaitingClients(const std::string& key);
+  // void wakeupWaitingClients(const std::string& key);
 
   std::unordered_map<std::string, std::vector<uint8_t>> tcpStore_;
   // From key -> the list of UvClient waiting on the key
