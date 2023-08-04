@@ -1105,6 +1105,45 @@ std::vector<std::string> split_str(const std::string &s, char del) {
   return res;
 }
 
+/*
+Random throughts.
+registration flow is:
+    set("/register", pg_name $ pg_size $ rank)
+    wait("/pg_name$ready")
+The / is due to TCPStore client that forces it.
+IDK if this is a good protocol, the $ready makes wait() more brittle.
+  Plus there's no way to error out. :(
+
+PLAN:
+implement nccl desync report only, then we can venture on more fun stuff like straggler/shape detection
+  this means, after timeout, we report: missing ranks, ranks that didn't finish, dump global collective state.
+
+for that we need:
+  emit the start call >after< we schedule the collective
+  emit collective end in the watchdog thread, we sort of have it in the right spot.
+  proper bootstraping - we should bootstrap to a random port and then publish it to the store.
+  async client (for set at least) would be nice.
+  schedule a timer and run the report.
+*/
+
+enum RankOpStatus {
+  Start,
+  End,
+  EndButNotStart
+};
+
+struct RankStatus{
+  std::string op;
+  RankOpStatus status;
+};
+
+struct CollectiveStatus {
+  size_t sequence = 0;
+  size_t size;
+  size_t ranks_done;
+  std::unordered_map<int, RankStatus> rank_map;
+};
+
 class DebugService : public ServiceBase {
   struct PgData {
     int pg_size;
