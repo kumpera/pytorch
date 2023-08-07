@@ -1225,6 +1225,18 @@ for that we need:
   schedule a timer and run the report.
 */
 
+std::string ranksToString(const std::vector<int>& ranks) {
+  std::string str;
+  for (int rank : ranks) {
+    if (str.empty()) {
+      str = std::to_string(rank);
+    } else {
+      str += ", " + std::to_string(rank);
+    }
+  }
+  return str;
+}
+
 enum RankOpStatus {
   Start,
   End,
@@ -1302,7 +1314,53 @@ struct PgData {
       return false;
     }
   }
+
+  std::string buildDesyncReport(int64_t sequence_number) {
+    std::string report;
+
+    std::vector<int> missingRanks;
+
+    for (const auto rank : c10::irange(pg_size)) {
+      bool found = false;
+      for (auto &it : collectives) {
+        if (it.second.rank_map.count(rank) == 1) {
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        missingRanks.emplace_back(rank);
+      }
+    }
+
+    auto thisCol = collectives[sequence_number].rank_map.begin()->second.op;
+
+    report += c10::str(
+        "\n\t - Timeout at collective: ", thisCol, ", #", sequence_number);
+
+    if (!missingRanks.empty()) {
+      report += analyzeMissingRanks(missingRanks);
+    } else {
+      // report += analyzeLaggingRanks();
+      // report += dumpSnapshot();
+    }
+
+    return report;
+  }
+
+  std::string analyzeMissingRanks(const std::vector<int>& missingRanks) {
+  return c10::str(
+      "\n\t - To our best knowledge, ranks [",
+      ranksToString(missingRanks),
+      "] are the lagging ranks that caused this timeout. "
+      "They never joined any collectives");
+}
 };
+
+
+
+
 
 
 class DebugService : public ServiceBase {
@@ -1325,8 +1383,9 @@ class DebugService : public ServiceBase {
   }
 
   void checkCollective(const std::string& pg_name, int64_t sequence_number) {
-    printf(">>>>>> PG:%s SEQ:%ld TIMEDOUT OMG!\n", pg_name.c_str(), sequence_number);
+    auto res = pg_registry[pg_name].buildDesyncReport(sequence_number);
 
+    printf(">>>>>> PG:%s SEQ:%ld TIMEDOUT OMG!\n::%s\n", pg_name.c_str(), sequence_number, res.c_str());
   }
 
   void collectiveStart(const std::string& pg_name, int rank, int64_t sequence_number, const std::string& coll_name) {
@@ -1454,6 +1513,7 @@ public:
     throw new std::runtime_error("not implemented");
   }
 };
+
 
 #endif
 
