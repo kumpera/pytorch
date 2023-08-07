@@ -1342,12 +1342,52 @@ struct PgData {
     if (!missingRanks.empty()) {
       report += analyzeMissingRanks(missingRanks);
     } else {
-      // report += analyzeLaggingRanks();
-      // report += dumpSnapshot();
+      report += analyzeLaggingRanks(sequence_number);
+      report += dumpSnapshot();
     }
 
     return report;
   }
+
+
+inline std::string dumpSnapshot() {
+  std::string report = "\n\t - Snapshot of ranks' latest states:";
+    for (auto &it : collectives) {
+      auto seq = it.first;
+      std::unordered_map<std::string, std::vector<int>> collectivesStart;
+      std::unordered_map<std::string, std::vector<int>> collectivesEnd;
+
+      for (auto &rinfo : it.second.rank_map) {
+        if (rinfo.second.status == Start){
+          collectivesStart[rinfo.second.op].push_back(rinfo.first);
+        } else {
+          collectivesEnd[rinfo.second.op].push_back(rinfo.first);
+        }
+      }
+
+      if (collectivesStart.size()) {
+        report += c10::str("\n\t   #", seq, " started ranks:");
+        for (auto& mapPair : collectivesStart) {
+          report += c10::str(
+              "\n\t     [",
+              ranksToString(mapPair.second),
+              "] started ",
+              mapPair.first);
+        }
+      }
+      if (collectivesEnd.size()) {
+        report += c10::str("\n\t   #", seq, " finished ranks:");
+        for (auto& mapPair : collectivesEnd) {
+          report += c10::str(
+              "\n\t     [",
+              ranksToString(mapPair.second),
+              "] finished ",
+              mapPair.first);
+        }
+      }
+    }
+  return report;
+}
 
   std::string analyzeMissingRanks(const std::vector<int>& missingRanks) {
   return c10::str(
@@ -1355,7 +1395,44 @@ struct PgData {
       ranksToString(missingRanks),
       "] are the lagging ranks that caused this timeout. "
       "They never joined any collectives");
-}
+  }
+
+
+  inline std::string analyzeLaggingRanks(int64_t sequence_number) {
+    std::vector<int> startRanks;
+    std::vector<int> endRanks;
+    for (auto &it : collectives) {
+      for (auto &rinfo : it.second.rank_map) {
+        if(rinfo.second.status == Start) {
+          startRanks.emplace_back(rinfo.first);
+        } else {
+          endRanks.emplace_back(rinfo.first);
+        }
+      }
+    }
+    std::string report =
+        "\n\t - To our best knowledge, the lagging/dead/mismatched ranks "
+        "that caused the desync are:";
+    if (startRanks.size()) {
+      report += c10::str(
+          "\n\t   - [",
+          ranksToString(startRanks),
+          "] joined but didn't finish collective #",
+          sequence_number,
+          " (count from 1)");
+    }
+    if (endRanks.size()) {
+      report += c10::str(
+          "\n\t     [",
+          ranksToString(endRanks),
+          "] finished collective #",
+          sequence_number,
+          ", but didn't join collective #",
+          sequence_number + 1,
+          " (count from 1)");
+    }
+    return report;
+  }
 };
 
 
