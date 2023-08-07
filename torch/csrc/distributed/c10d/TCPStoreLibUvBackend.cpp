@@ -1,8 +1,10 @@
 #include <algorithm>
+#include <cstdlib>
 #include <deque>
 #include <exception>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1106,13 +1108,23 @@ std::vector<std::string> split_str(const std::string &s, char del) {
 }
 
 /*
-Random throughts.
+Random throughts:
 registration flow is:
     set("/register", pg_name $ pg_size $ rank)
     wait("/pg_name$ready")
 The / is due to TCPStore client that forces it.
 IDK if this is a good protocol, the $ready makes wait() more brittle.
   Plus there's no way to error out. :(
+
+event flow:
+  set(/pg_name$rank$event-name, sequence_number$coll-name)
+
+It's silly to have to sent the rank every time
+  Can be fixed later by remembering it during registration.
+
+We want to send lots more data
+  PGWrapper shape data
+  timing information < we'd be able to do online straggler detection.
 
 PLAN:
 implement nccl desync report only, then we can venture on more fun stuff like straggler/shape detection
@@ -1129,27 +1141,86 @@ for that we need:
 enum RankOpStatus {
   Start,
   End,
-  EndButNotStart
+  BadEventOrdering
 };
 
-struct RankStatus{
+struct RankStatus {
   std::string op;
   RankOpStatus status;
 };
 
 struct CollectiveStatus {
-  size_t sequence = 0;
-  size_t size;
-  size_t ranks_done;
+  int size = -1;
+  int ranks_done = 0;
+  int bad_events = 0;
   std::unordered_map<int, RankStatus> rank_map;
+
+  // CollectiveStatus(CollectiveStatus &&other) = default;
+  // CollectiveStatus(const CollectiveStatus &other) = default;
+
+  void start(int rank, const std::string& coll_name) {
+    if(rank_map.count(rank) > 0) {
+      rank_map[rank].status = BadEventOrdering;
+    } else {
+      rank_map[rank] = RankStatus { coll_name, Start };
+    }
+    printf(">>>> (start) coll status size:%d ranks in:%ld bad:%d done:%d <<<<\n", size, rank_map.size(), bad_events, ranks_done);
+  }
+
+  bool end(int rank, const std::string& coll_name) {
+    if(rank_map.count(rank) == 0) {
+      rank_map[rank] = RankStatus { coll_name, BadEventOrdering };
+      ++bad_events;
+    } else {
+      if (rank_map[rank].status != Start) {
+        rank_map[rank].status = BadEventOrdering;
+        ++bad_events;
+      } else {
+        rank_map[rank].status = End;
+        ++ranks_done;
+      }
+    }
+    printf(">>>> (end) coll status size:%d ranks in:%ld bad:%d done:%d <<<<\n", size, rank_map.size(), bad_events, ranks_done);
+    return ranks_done == size;
+  }
+};
+
+struct PgData {
+  int pg_size;
+  int registered_ranks;
+  std::unordered_map<int64_t, CollectiveStatus> collectives;
+
+
+  bool collectiveStart(int rank, int64_t sequence_number, const std::string& coll_name) {
+    auto it = collectives.find(sequence_number);
+    if(it == collectives.end()) {
+      collectives[sequence_number].size = pg_size;
+      collectives[sequence_number].start(rank, coll_name);
+      return true;
+    } else {
+      it->second.start(rank, coll_name);
+      return false;
+    }
+  }
+
+  bool collectiveEnd(int rank, int64_t sequence_number, const std::string& coll_name) {
+    auto it = collectives.find(sequence_number);
+    if(it == collectives.end()) {
+      printf("invalid end collective event with unregistered sequence %ld\n", sequence_number);
+      return true;
+    } else {
+      if(it->second.end(rank, coll_name)) {
+        collectives.erase(it);
+        return true;
+      }
+      return false;
+    }
+  }
+
+
 };
 
 class DebugService : public ServiceBase {
-  struct PgData {
-    int pg_size;
-    int registered_ranks;
-  };
-
   std::unordered_map<std::string, PgData> pg_registry;
 
   void registerPg(const std::string &pg_name, int ws, int rank) {
@@ -1164,6 +1235,32 @@ class DebugService : public ServiceBase {
       // auto wakeUpKey = pg_name + "$ready";
       printf("waking up all clients waiting on %s\n", pg_name.c_str());
       wakeupWaitingClients(pg_name);
+    }
+  }
+
+  void collectiveStart(const std::string& pg_name, int rank, int64_t sequence_number, const std::string& coll_name) {
+    auto it = pg_registry.find(pg_name);
+    if(it == pg_registry.end()) {
+      printf("Invalid col-start with unknown pg: %s\n", pg_name.c_str());
+      return;
+    }
+    auto newCollective = it->second.collectiveStart(rank, sequence_number, coll_name);
+    if (newCollective) {
+      printf(">>>>>WE HAVE a new collective on pg %s with seq %ld\n", pg_name.c_str(), sequence_number);
+      //setup timer
+    }
+  }
+
+  void collectiveEnd(const std::string& pg_name, int rank, int64_t sequence_number, const std::string& coll_name) {
+    auto it = pg_registry.find(pg_name);
+    if(it == pg_registry.end()) {
+      printf("Invalid col-end with unknown pg: %s\n", pg_name.c_str());
+      return;
+    }
+    auto collectiveDone = it->second.collectiveEnd(rank, sequence_number, coll_name);
+    if (collectiveDone) {
+      printf("------WE HAVE a collective done on pg %s with seq %ld\n", pg_name.c_str(), sequence_number);
+      //clear timer
     }
   }
 
@@ -1185,8 +1282,8 @@ public:
     set("register", pg_name $ pg_size $ rank)
     set(pg_name $ rank $ event, payload)
     */
+    std::string value_as_str(value.begin(), value.end());
     if(key == "/register") {
-      std::string value_as_str(value.begin(), value.end());
       auto parts = split_str(value_as_str, '$');
       if(parts.size() != 3) {
         printf("we got an odd register(%zu) %s\n", parts.size(), value_as_str.c_str());
@@ -1199,8 +1296,15 @@ public:
       if(parts.size() != 3) {
         printf("we got an odd event(%zu) %s\n", parts.size(), key.c_str());
       } else {
-        parts[0] = parts[0].substr(1);
         printf("pg %s with rank %s got event %s\n", parts[0].c_str(), parts[1].c_str(), parts[2].c_str());
+        auto evt_parts = split_str(value_as_str, '#');
+        if (parts[2] == "col-start") {
+          collectiveStart(parts[0], std::stoi(parts[1]), std::stoll(evt_parts[0]), evt_parts[1]);
+        } else if (parts[2] == "col-end") {
+          collectiveEnd(parts[0], std::stoi(parts[1]), std::stoll(evt_parts[0]), evt_parts[1]);
+        } else {
+          printf("unknown event! %s\n", parts[2].c_str());
+        }
       }
     }
     // throw new std::runtime_error("not implemented");
