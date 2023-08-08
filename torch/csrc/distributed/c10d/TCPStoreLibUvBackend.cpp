@@ -1317,9 +1317,8 @@ struct PgData {
 
   std::string buildDesyncReport(int64_t sequence_number) {
     std::string report;
-
     std::vector<int> missingRanks;
-
+    printf("hahaha1111\n");
     for (const auto rank : c10::irange(pg_size)) {
       bool found = false;
       for (auto &it : collectives) {
@@ -1333,18 +1332,25 @@ struct PgData {
         missingRanks.emplace_back(rank);
       }
     }
-
+    printf("hahaha222221\n");
     auto thisCol = collectives[sequence_number].rank_map.begin()->second.op;
 
     report += c10::str(
         "\n\t - Timeout at collective: ", thisCol, ", #", sequence_number);
-
+printf("3333333\n");
     if (!missingRanks.empty()) {
+      printf("444444\n");
       report += analyzeMissingRanks(missingRanks);
+      printf("55555\n");
     } else {
+      printf("66666\n");
       report += analyzeLaggingRanks(sequence_number);
+      printf("777777\n");
       report += dumpSnapshot();
+      printf("888888\n");
     }
+
+    printf("99999999\n");
 
     return report;
   }
@@ -1460,6 +1466,7 @@ class DebugService : public ServiceBase {
   }
 
   void checkCollective(const std::string& pg_name, int64_t sequence_number) {
+    printf("-------- checkCollective %s (%ld)\n", pg_name.c_str(), sequence_number);
     auto res = pg_registry[pg_name].buildDesyncReport(sequence_number);
 
     printf(">>>>>> PG:%s SEQ:%ld TIMEDOUT OMG!\n::%s\n", pg_name.c_str(), sequence_number, res.c_str());
