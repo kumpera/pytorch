@@ -1,15 +1,15 @@
+#include <c10/util/intrusive_ptr.h>
 #include <algorithm>
 #include <cstdlib>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <functional>
-#include "c10/util/intrusive_ptr.h"
 
 #include <fmt/format.h>
 #include <torch/csrc/distributed/c10d/TCPStore.hpp>
@@ -272,34 +272,29 @@ class ChunkedStream {
   }
 };
 
-class UvTimer: public c10::intrusive_ptr_target {
+class UvTimer : public c10::intrusive_ptr_target {
   uv_timer_t timer;
   std::function<void()> cb;
   bool active = false;
 
-  static void timer_fired(uv_timer_t *timer) {
-    UvTimer *t = (UvTimer *)uv_handle_get_data((uv_handle_t *)timer);
-    printf("timer fired %p\n", t);
+  static void timer_fired(uv_timer_t* timer) {
+    UvTimer* t = (UvTimer*)uv_handle_get_data((uv_handle_t*)timer);
     t->cb();
     t->cancel();
   }
-  static void timer_closed(uv_handle_t *handle) {
-    UvTimer *t = (UvTimer *)uv_handle_get_data(handle);
+  static void timer_closed(uv_handle_t* handle) {
+    UvTimer* t = (UvTimer*)uv_handle_get_data(handle);
     // EVIL
     at::raw::intrusive_ptr::decref(t);
   }
 
-
-public:
-  UvTimer(uv_loop_t *loop, std::function<void()> &&cb): cb(std::move(cb)) {
+ public:
+  UvTimer(uv_loop_t* loop, std::function<void()>&& cb) : cb(std::move(cb)) {
     uv_timer_init(loop, &timer);
     uv_handle_set_data((uv_handle_t*)&timer, this);
   }
 
-  ~UvTimer() {
-    printf("****UvTimer dtor %p %d\n", this, active);
-
-  }
+  ~UvTimer() {}
 
   void cancel() {
     if (!active) {
@@ -313,7 +308,7 @@ public:
   bool schedule(uint64_t timeout_ms) {
     int res = uv_timer_start(&timer, UvTimer::timer_fired, timeout_ms, 1);
     if (res) {
-          C10D_DEBUG(
+      C10D_DEBUG(
           "timer start failed. code:{} name:{} desc:{}. ",
           res,
           uv_err_name(res),
@@ -328,16 +323,15 @@ public:
 };
 
 struct CancelationToken {
-
   CancelationToken() {}
-  explicit CancelationToken(c10::intrusive_ptr<UvTimer> timer): timer(timer) {}
+  explicit CancelationToken(c10::intrusive_ptr<UvTimer> timer) : timer(timer) {}
 
   void cancel() {
-    if(timer.defined())
+    if (timer.defined())
       timer->cancel();
   }
 
-private:
+ private:
   c10::intrusive_ptr<UvTimer> timer;
 };
 
@@ -351,20 +345,26 @@ class ServiceBase : public BackgroundThread {
   uint16_t get_socket_port(uv_tcp_t* handle);
   void init(const TCPStoreOptions& opts);
 
-  virtual void set(const std::string& key, const std::vector<uint8_t>& value) = 0;
+  virtual void set(
+      const std::string& key,
+      const std::vector<uint8_t>& value) = 0;
   virtual const std::vector<uint8_t>& compareAndSet(
       const std::string& key,
       const std::vector<uint8_t>& expectedValue,
-      const std::vector<uint8_t>& newValue)  = 0;
-  virtual const std::vector<uint8_t>& get(const std::string& key)  = 0;
-  virtual int64_t add(const std::string& key, int64_t addVal)  = 0;
-  virtual bool checkKeys(const std::vector<std::string>& keys)  = 0;
-  virtual bool waitKeys(const std::vector<std::string>& keys, UvHandle* client)  = 0;
+      const std::vector<uint8_t>& newValue) = 0;
+  virtual const std::vector<uint8_t>& get(const std::string& key) = 0;
+  virtual int64_t add(const std::string& key, int64_t addVal) = 0;
+  virtual bool checkKeys(const std::vector<std::string>& keys) = 0;
+  virtual bool waitKeys(
+      const std::vector<std::string>& keys,
+      UvHandle* client) = 0;
   virtual int64_t size() = 0;
   virtual int64_t deleteKey(const std::string& key) = 0;
-  virtual void append(const std::string& key, const std::vector<uint8_t>& value) = 0;
+  virtual void append(
+      const std::string& key,
+      const std::vector<uint8_t>& value) = 0;
 
-  //client and wait state management
+  // client and wait state management
   void clearClientWaitState(UvHandle* client);
 
   void registerClient(UvHandle* client);
@@ -374,7 +374,7 @@ class ServiceBase : public BackgroundThread {
   void run() override;
   void stop() override;
   void wakeupWaitingClients(const std::string& key);
-  void registerWait(UvHandle *client, const std::string &key);
+  void registerWait(UvHandle* client, const std::string& key);
 
   CancelationToken scheduleTimer(int64_t timeout_ms, std::function<void()> cb) {
     auto timer = c10::make_intrusive<UvTimer>(&loop, std::move(cb));
@@ -413,8 +413,8 @@ class ServiceBase : public BackgroundThread {
 };
 
 class StoreService : public ServiceBase {
-public:
-  StoreService(int port): ServiceBase(port) {}
+ public:
+  StoreService(int port) : ServiceBase(port) {}
   ~StoreService() override = default;
 
   void set(const std::string& key, const std::vector<uint8_t>& value) override;
@@ -425,15 +425,16 @@ public:
   const std::vector<uint8_t>& get(const std::string& key) override;
   int64_t add(const std::string& key, int64_t addVal) override;
   bool checkKeys(const std::vector<std::string>& keys) override;
-  bool waitKeys(const std::vector<std::string>& keys, UvHandle* client) override;
+  bool waitKeys(const std::vector<std::string>& keys, UvHandle* client)
+      override;
   int64_t size() override;
   int64_t deleteKey(const std::string& key) override;
-  void append(const std::string& key, const std::vector<uint8_t>& value) override;
+  void append(const std::string& key, const std::vector<uint8_t>& value)
+      override;
 
-private:
+ private:
   std::unordered_map<std::string, std::vector<uint8_t>> tcpStore_;
 };
-
 
 class UvClient : public UvHandle {
   uv_tcp_t client;
@@ -915,9 +916,7 @@ bool ServiceBase::tryListen(bool use_ipv6) {
     return false;
   }
   res = uv_listen(
-      (uv_stream_t*)&server,
-      DEFAULT_BACKLOG,
-      ServiceBase::on_new_connection);
+      (uv_stream_t*)&server, DEFAULT_BACKLOG, ServiceBase::on_new_connection);
   if (res) {
     C10D_WARNING(
         "UV Store listen failure. ipv6:{} message:{}",
@@ -931,8 +930,7 @@ bool ServiceBase::tryListen(bool use_ipv6) {
 ServiceBase::ServiceBase(int port) : port_(port) {
   TORCH_CHECK(uv_loop_init(&loop) == 0, "Failed to init uv loop");
   TORCH_CHECK(
-      uv_async_init(&loop, &exit_handle, ServiceBase::on_exit_request) ==
-          0,
+      uv_async_init(&loop, &exit_handle, ServiceBase::on_exit_request) == 0,
       "Failed to init uv async event");
   uv_handle_set_data((uv_handle_t*)&exit_handle, this);
 }
@@ -958,11 +956,6 @@ void ServiceBase::print_active_handles(uv_handle_t* handle, void* arg) {
       (int)handle->type,
       uv_is_active(handle),
       uv_is_closing(handle));
-  printf(
-      "\tUV live handle type:%d active:%d is-closing:%d\n",
-      (int)handle->type,
-      uv_is_active(handle),
-      uv_is_closing(handle));
 }
 
 void ServiceBase::run() {
@@ -973,11 +966,10 @@ void ServiceBase::run() {
   }
   bool debug_enabled =
       c10d::detail::isLogLevelEnabled(c10d::detail::LogLevel::Debug);
-    debug_enabled = true;
+  debug_enabled = true;
 
   if (debug_enabled) {
     C10D_DEBUG("Walking live handles prior to closing clients");
-    printf("Walking live handles prior to closing clients\n");
     uv_walk(&loop, ServiceBase::print_active_handles, nullptr);
   }
 
@@ -988,7 +980,6 @@ void ServiceBase::run() {
 
   if (debug_enabled) {
     C10D_DEBUG("Walking live handles after closing clients");
-    printf("Walking live handles after closing clients\n");
     uv_walk(&loop, ServiceBase::print_active_handles, nullptr);
   }
 
@@ -997,7 +988,6 @@ void ServiceBase::run() {
     if (res == 0) {
       break;
     }
-    printf("loop still not cloeable %d %s\n", res, uv_strerror(res));
     C10D_INFO(
         "uv_loop_close failed with:{} errn:{} desc:{}",
         res,
@@ -1006,7 +996,6 @@ void ServiceBase::run() {
     res = uv_run(&loop, UV_RUN_NOWAIT);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
-  printf("ciau loop\n");
   C10D_INFO("uv_loop cleanup finished.");
 }
 
@@ -1131,9 +1120,9 @@ bool StoreService::waitKeys(
   return false;
 }
 
-void ServiceBase::registerWait(UvHandle *client, const std::string &key) {
+void ServiceBase::registerWait(UvHandle* client, const std::string& key) {
   waitingSockets_[key].push_back(client);
-  if(keysAwaited_.count(client) == 0) {
+  if (keysAwaited_.count(client) == 0) {
     keysAwaited_[client] = 1;
   } else {
     keysAwaited_[client] += 1;
@@ -1177,18 +1166,17 @@ void ServiceBase::wakeupWaitingClients(const std::string& key) {
   }
 }
 
-
-//XXX can we use string_view in PT?
-std::vector<std::string> split_str(const std::string &s, char del) {
+// XXX can we use string_view in PT?
+std::vector<std::string> split_str(const std::string& s, char del) {
   std::vector<std::string> res;
   std::string::size_type start = 0;
   auto end = s.find(del, start);
-  while(end != std::string::npos) {
+  while (end != std::string::npos) {
     res.emplace_back(s.substr(start, end - start));
     start = end + 1;
     end = s.find(del, start);
   }
-  if(start < s.size()) {
+  if (start < s.size()) {
     res.emplace_back(s.substr(start));
   }
   return res;
@@ -1214,15 +1202,16 @@ We want to send lots more data
   timing information < we'd be able to do online straggler detection.
 
 PLAN:
-implement nccl desync report only, then we can venture on more fun stuff like straggler/shape detection
-  this means, after timeout, we report: missing ranks, ranks that didn't finish, dump global collective state.
+implement nccl desync report only, then we can venture on more fun stuff like
+straggler/shape detection this means, after timeout, we report: missing ranks,
+ranks that didn't finish, dump global collective state.
 
 for that we need:
   emit the start call >after< we schedule the collective
-  emit collective end in the watchdog thread, we sort of have it in the right spot.
-  proper bootstraping - we should bootstrap to a random port and then publish it to the store.
-  async client (for set at least) would be nice.
-  schedule a timer and run the report.
+  emit collective end in the watchdog thread, we sort of have it in the right
+spot. proper bootstraping - we should bootstrap to a random port and then
+publish it to the store. async client (for set at least) would be nice. schedule
+a timer and run the report.
 */
 
 std::string ranksToString(const std::vector<int>& ranks) {
@@ -1237,11 +1226,7 @@ std::string ranksToString(const std::vector<int>& ranks) {
   return str;
 }
 
-enum RankOpStatus {
-  Start,
-  End,
-  BadEventOrdering
-};
+enum RankOpStatus { Start, End, BadEventOrdering };
 
 struct RankStatus {
   std::string op;
@@ -1255,19 +1240,17 @@ struct CollectiveStatus {
   std::unordered_map<int, RankStatus> rank_map;
   CancelationToken timer;
 
-
   void start(int rank, const std::string& coll_name) {
-    if(rank_map.count(rank) > 0) {
+    if (rank_map.count(rank) > 0) {
       rank_map[rank].status = BadEventOrdering;
     } else {
-      rank_map[rank] = RankStatus { coll_name, Start };
+      rank_map[rank] = RankStatus{coll_name, Start};
     }
-    // printf(">>>> (start) coll status size:%d ranks in:%ld bad:%d done:%d <<<<\n", size, rank_map.size(), bad_events, ranks_done);
   }
 
   bool end(int rank, const std::string& coll_name) {
-    if(rank_map.count(rank) == 0) {
-      rank_map[rank] = RankStatus { coll_name, BadEventOrdering };
+    if (rank_map.count(rank) == 0) {
+      rank_map[rank] = RankStatus{coll_name, BadEventOrdering};
       ++bad_events;
     } else {
       if (rank_map[rank].status != Start) {
@@ -1278,7 +1261,6 @@ struct CollectiveStatus {
         ++ranks_done;
       }
     }
-    // printf(">>>> (end) coll status size:%d ranks in:%ld bad:%d done:%d <<<<\n", size, rank_map.size(), bad_events, ranks_done);
     return ranks_done == size;
   }
 };
@@ -1288,10 +1270,12 @@ struct PgData {
   int registered_ranks;
   std::unordered_map<int64_t, CollectiveStatus> collectives;
 
-
-  bool collectiveStart(int rank, int64_t sequence_number, const std::string& coll_name) {
+  bool collectiveStart(
+      int rank,
+      int64_t sequence_number,
+      const std::string& coll_name) {
     auto it = collectives.find(sequence_number);
-    if(it == collectives.end()) {
+    if (it == collectives.end()) {
       collectives[sequence_number].size = pg_size;
       collectives[sequence_number].start(rank, coll_name);
       return true;
@@ -1301,13 +1285,16 @@ struct PgData {
     }
   }
 
-  bool collectiveEnd(int rank, int64_t sequence_number, const std::string& coll_name) {
+  bool collectiveEnd(
+      int rank,
+      int64_t sequence_number,
+      const std::string& coll_name) {
     auto it = collectives.find(sequence_number);
-    if(it == collectives.end()) {
-      printf("invalid end collective event with unregistered sequence %ld\n", sequence_number);
+    if (it == collectives.end()) {
       return true;
     } else {
-      if(it->second.end(rank, coll_name)) {
+      if (it->second.end(rank, coll_name)) {
+        it->second.timer.cancel();
         collectives.erase(it);
         return true;
       }
@@ -1318,10 +1305,15 @@ struct PgData {
   std::string buildDesyncReport(int64_t sequence_number) {
     std::string report;
     std::vector<int> missingRanks;
-    printf("hahaha1111\n");
+    if (collectives.count(sequence_number) == 0) {
+      return c10::str(
+          "Timeout at collective #",
+          sequence_number,
+          " but there's no information on it left");
+    }
     for (const auto rank : c10::irange(pg_size)) {
       bool found = false;
-      for (auto &it : collectives) {
+      for (auto& it : collectives) {
         if (it.second.rank_map.count(rank) == 1) {
           found = true;
           break;
@@ -1332,39 +1324,30 @@ struct PgData {
         missingRanks.emplace_back(rank);
       }
     }
-    printf("hahaha222221\n");
+
     auto thisCol = collectives[sequence_number].rank_map.begin()->second.op;
 
-    report += c10::str(
-        "\n\t - Timeout at collective: ", thisCol, ", #", sequence_number);
-printf("3333333\n");
+    report +=
+        c10::str("\nTimeout at collective: ", thisCol, ", #", sequence_number);
     if (!missingRanks.empty()) {
-      printf("444444\n");
       report += analyzeMissingRanks(missingRanks);
-      printf("55555\n");
     } else {
-      printf("66666\n");
       report += analyzeLaggingRanks(sequence_number);
-      printf("777777\n");
       report += dumpSnapshot();
-      printf("888888\n");
     }
-
-    printf("99999999\n");
 
     return report;
   }
 
-
-inline std::string dumpSnapshot() {
-  std::string report = "\n\t - Snapshot of ranks' latest states:";
-    for (auto &it : collectives) {
+  inline std::string dumpSnapshot() {
+    std::string report = "\n\t - Snapshot of ranks' latest states:";
+    for (auto& it : collectives) {
       auto seq = it.first;
       std::unordered_map<std::string, std::vector<int>> collectivesStart;
       std::unordered_map<std::string, std::vector<int>> collectivesEnd;
 
-      for (auto &rinfo : it.second.rank_map) {
-        if (rinfo.second.status == Start){
+      for (auto& rinfo : it.second.rank_map) {
+        if (rinfo.second.status == Start) {
           collectivesStart[rinfo.second.op].push_back(rinfo.first);
         } else {
           collectivesEnd[rinfo.second.op].push_back(rinfo.first);
@@ -1392,24 +1375,23 @@ inline std::string dumpSnapshot() {
         }
       }
     }
-  return report;
-}
-
-  std::string analyzeMissingRanks(const std::vector<int>& missingRanks) {
-  return c10::str(
-      "\n\t - To our best knowledge, ranks [",
-      ranksToString(missingRanks),
-      "] are the lagging ranks that caused this timeout. "
-      "They never joined any collectives");
+    return report;
   }
 
+  std::string analyzeMissingRanks(const std::vector<int>& missingRanks) {
+    return c10::str(
+        "\n\t - To our best knowledge, ranks [",
+        ranksToString(missingRanks),
+        "] are the lagging ranks that caused this timeout. "
+        "They never joined any collectives");
+  }
 
   inline std::string analyzeLaggingRanks(int64_t sequence_number) {
     std::vector<int> startRanks;
     std::vector<int> endRanks;
-    for (auto &it : collectives) {
-      for (auto &rinfo : it.second.rank_map) {
-        if(rinfo.second.status == Start) {
+    for (auto& it : collectives) {
+      for (auto& rinfo : it.second.rank_map) {
+        if (rinfo.second.status == Start) {
           startRanks.emplace_back(rinfo.first);
         } else {
           endRanks.emplace_back(rinfo.first);
@@ -1441,76 +1423,83 @@ inline std::string dumpSnapshot() {
   }
 };
 
-
-
-
-
-
 class DebugService : public ServiceBase {
-  DebugService(const DebugService &DebugService) = delete;
+  DebugService(const DebugService& DebugService) = delete;
   std::unordered_map<std::string, PgData> pg_registry;
 
-  void registerPg(const std::string &pg_name, int ws, int rank) {
+  void registerPg(const std::string& pg_name, int ws, int rank) {
     // for now, we ignore rank
     if (pg_registry.count(pg_name) == 0) {
-      pg_registry[pg_name] = PgData { ws, 1 };
+      pg_registry[pg_name] = PgData{ws, 1};
     } else {
       pg_registry[pg_name].registered_ranks += 1;
     }
-    printf("reg done pg: %s ws:%d entered: %d\n", pg_name.c_str(), pg_registry[pg_name].pg_size, pg_registry[pg_name].registered_ranks);
     if (isPgReady(pg_name)) {
-      // auto wakeUpKey = pg_name + "$ready";
-      printf("waking up all clients waiting on %s\n", pg_name.c_str());
       wakeupWaitingClients(pg_name);
     }
   }
 
   void checkCollective(const std::string& pg_name, int64_t sequence_number) {
-    printf("-------- checkCollective %s (%ld)\n", pg_name.c_str(), sequence_number);
+    if (pg_registry[pg_name].collectives.count(sequence_number) == 0) {
+      return;
+    }
     auto res = pg_registry[pg_name].buildDesyncReport(sequence_number);
-
-    printf(">>>>>> PG:%s SEQ:%ld TIMEDOUT OMG!\n::%s\n", pg_name.c_str(), sequence_number, res.c_str());
+    printf(
+        "ProcessGroup:%s SEQ:%ld timeout::%s\n",
+        pg_name.c_str(),
+        sequence_number,
+        res.c_str());
   }
 
-  void collectiveStart(const std::string& pg_name, int rank, int64_t sequence_number, const std::string& coll_name) {
+  void collectiveStart(
+      const std::string& pg_name,
+      int rank,
+      int64_t sequence_number,
+      const std::string& coll_name) {
     auto it = pg_registry.find(pg_name);
-    if(it == pg_registry.end()) {
+    if (it == pg_registry.end()) {
       printf("Invalid col-start with unknown pg: %s\n", pg_name.c_str());
       return;
     }
-    auto newCollective = it->second.collectiveStart(rank, sequence_number, coll_name);
+    auto newCollective =
+        it->second.collectiveStart(rank, sequence_number, coll_name);
     if (newCollective) {
-      printf(">>>>>WE HAVE a new collective on pg %s with seq %ld\n", pg_name.c_str(), sequence_number);
-      //setup timer
-      auto ct = scheduleTimer(1000, [=]() { checkCollective(pg_name, sequence_number); });
+      // setup timer
+      auto ct = scheduleTimer(
+          500, [=]() { checkCollective(pg_name, sequence_number); });
       it->second.collectives[sequence_number].timer = ct;
     }
+    // printf("[COL-START] seq: %ld rank: %d first:%d\n", sequence_number, rank,
+    // newCollective);
   }
 
-  void collectiveEnd(const std::string& pg_name, int rank, int64_t sequence_number, const std::string& coll_name) {
+  void collectiveEnd(
+      const std::string& pg_name,
+      int rank,
+      int64_t sequence_number,
+      const std::string& coll_name) {
     auto it = pg_registry.find(pg_name);
-    if(it == pg_registry.end()) {
+    if (it == pg_registry.end()) {
       printf("Invalid col-end with unknown pg: %s\n", pg_name.c_str());
       return;
     }
-    auto collectiveDone = it->second.collectiveEnd(rank, sequence_number, coll_name);
-    if (collectiveDone) {
-      printf("------WE HAVE a collective done on pg %s with seq %ld\n", pg_name.c_str(), sequence_number);
-      it->second.collectives[sequence_number].timer.cancel();
-    }
+    auto collectiveDone =
+        it->second.collectiveEnd(rank, sequence_number, coll_name);
+    // printf("[COL-END] seq: %ld rank: %d done:%d\n", sequence_number, rank,
+    // collectiveDone);
   }
 
-  bool isPgReady(const std::string &pg_name) {
+  bool isPgReady(const std::string& pg_name) {
     auto it = pg_registry.find(pg_name);
-    if(it == pg_registry.end()) {
+    if (it == pg_registry.end()) {
       printf("no pg name %s\n", pg_name.c_str());
       return false;
     }
-    // printf("isPgReady (%s):: size:%d rr:%d\n", pg_name.c_str(), it->second.pg_size, it->second.registered_ranks);
     return it->second.pg_size == it->second.registered_ranks;
   }
-public:
-  DebugService(int port): ServiceBase(port) {}
+
+ public:
+  DebugService(int port) : ServiceBase(port) {}
   ~DebugService() override = default;
 
   void set(const std::string& key, const std::vector<uint8_t>& value) override {
@@ -1519,62 +1508,66 @@ public:
     set(pg_name $ rank $ event, payload)
     */
     std::string value_as_str(value.begin(), value.end());
-    if(key == "/register") {
+    if (key == "/register") {
       auto parts = split_str(value_as_str, '$');
-      if(parts.size() != 3) {
-        printf("we got an odd register(%zu) %s\n", parts.size(), value_as_str.c_str());
+      if (parts.size() != 3) {
+        printf(
+            "we got an odd register(%zu) %s\n",
+            parts.size(),
+            value_as_str.c_str());
       } else {
-        // printf("we got a register call for pg:%s size:%s rank:%s\n", parts[0].c_str(), parts[1].c_str(), parts[2].c_str());
         registerPg("/" + parts[0], std::stoi(parts[1]), std::stoi(parts[2]));
       }
     } else {
       auto parts = split_str(key, '$');
-      if(parts.size() != 3) {
+      if (parts.size() != 3) {
         printf("we got an odd event(%zu) %s\n", parts.size(), key.c_str());
       } else {
-        // printf("pg %s with rank %s got event %s\n", parts[0].c_str(), parts[1].c_str(), parts[2].c_str());
         auto evt_parts = split_str(value_as_str, '#');
         if (parts[2] == "col-start") {
-          collectiveStart(parts[0], std::stoi(parts[1]), std::stoll(evt_parts[0]), evt_parts[1]);
+          collectiveStart(
+              parts[0],
+              std::stoi(parts[1]),
+              std::stoll(evt_parts[0]),
+              evt_parts[1]);
         } else if (parts[2] == "col-end") {
-          collectiveEnd(parts[0], std::stoi(parts[1]), std::stoll(evt_parts[0]), evt_parts[1]);
+          collectiveEnd(
+              parts[0],
+              std::stoi(parts[1]),
+              std::stoll(evt_parts[0]),
+              evt_parts[1]);
         } else {
           printf("unknown event! %s\n", parts[2].c_str());
         }
       }
     }
-    // throw new std::runtime_error("not implemented");
   }
 
   const std::vector<uint8_t>& compareAndSet(
       const std::string& key,
       const std::vector<uint8_t>& expectedValue,
       const std::vector<uint8_t>& newValue) override {
-      printf("NOOOO1\n");
     throw new std::runtime_error("not implemented");
   }
   const std::vector<uint8_t>& get(const std::string& key) override {
-      printf("NOOOO2\n");
     throw new std::runtime_error("not implemented");
   }
   int64_t add(const std::string& key, int64_t addVal) override {
-      printf("NOOOO3\n");
     throw new std::runtime_error("not implemented");
   }
   bool checkKeys(const std::vector<std::string>& keys) override {
-      printf("NOOOO4\n");
     throw new std::runtime_error("not implemented");
   }
-  bool waitKeys(const std::vector<std::string>& keys, UvHandle* client) override {
+  bool waitKeys(const std::vector<std::string>& keys, UvHandle* client)
+      override {
     bool ready = true;
-    for(auto &key : keys) {
+    for (auto& key : keys) {
       auto parts = split_str(key, '$');
       if (parts.size() != 2 || parts[1] != "ready") {
         printf("invalid wait command %s\n", key.c_str());
         return true;
       }
-      // printf("checking key %s for waiting => %d\n", parts[0].c_str(), isPgReady(parts[0]));
-      if(!isPgReady(parts[0])) {
+      if (!isPgReady(parts[0])) {
         ready = false;
         registerWait(client, parts[0]);
       }
@@ -1583,21 +1576,20 @@ public:
   }
 
   int64_t size() override {
-      printf("NOOOO6\n");
     throw new std::runtime_error("not implemented");
   }
 
   int64_t deleteKey(const std::string& key) override {
-      printf("NOOOO7\n");
+    printf("NOOOO7\n");
     throw new std::runtime_error("not implemented");
   }
 
-  void append(const std::string& key, const std::vector<uint8_t>& value) override {
-      printf("NOOOO8\n");
+  void append(const std::string& key, const std::vector<uint8_t>& value)
+      override {
+    printf("NOOOO8\n");
     throw new std::runtime_error("not implemented");
   }
 };
-
 
 #endif
 
@@ -1616,7 +1608,7 @@ std::unique_ptr<BackgroundThread> create_dbg_server_backend(
     const TCPStoreOptions& opts) {
 #ifdef TORCH_USE_LIBUV
   auto res = std::make_unique<DebugService>(opts.port);
-res->init(opts);
+  res->init(opts);
   return res;
 #else
   TORCH_CHECK(false, "Implementation missing");

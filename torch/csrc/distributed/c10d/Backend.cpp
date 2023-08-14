@@ -37,8 +37,8 @@ void Backend::registerForDebug(
 void Backend::emitEvent(
     const std::string& event,
     const std::vector<uint8_t>& data) {
-
-  //XXX taking a std::vector<uint8_t> sucks, we should take a span, but we're not c++ 20 yet
+  // XXX taking a std::vector<uint8_t> sucks, we should take a span, but we're
+  // not c++ 20 yet
   std::stringstream ss;
   ss << debug_pg_name_ << "$" << rank_ << "$" << event;
   auto x = ss.str();

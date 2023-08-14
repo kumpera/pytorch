@@ -64,9 +64,9 @@ std::mutex TCPServer::cache_mutex_{};
 
 std::shared_ptr<TCPServer> TCPServer::start(const TCPStoreOptions& opts) {
   auto startCore = [&opts]() {
-    auto daemon = opts.dbgServerHack ? create_dbg_server_backend(opts) :
-                opts.useLibUV ? create_libuv_tcpstore_backend(opts)
-                                : create_tcpstore_backend(opts);
+    auto daemon = opts.dbgServerHack ? create_dbg_server_backend(opts)
+        : opts.useLibUV              ? create_libuv_tcpstore_backend(opts)
+                                     : create_tcpstore_backend(opts);
     daemon->start();
     return std::make_shared<TCPServer>(daemon->port(), std::move(daemon));
   };

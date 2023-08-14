@@ -1410,13 +1410,7 @@ c10::intrusive_ptr<ProcessGroupNCCL::WorkNCCL> ProcessGroupNCCL::initWork(
     const char* profilingTitle,
     const c10::optional<std::vector<at::Tensor>>& inputs) {
   return c10::make_intrusive<ProcessGroupNCCL::WorkNCCL>(
-      devices,
-      rank,
-      opType,
-      seq_,
-      profilingTitle,
-      inputs,
-      desyncDebug_);
+      devices, rank, opType, seq_, profilingTitle, inputs, desyncDebug_);
 }
 
 std::vector<at::Tensor> ProcessGroupNCCL::WorkNCCL::result() {
