@@ -1226,61 +1226,58 @@ std::string ranksToString(const std::vector<int>& ranks) {
   return str;
 }
 
-enum RankOpStatus { Start, End, BadEventOrdering };
-
-struct RankStatus {
-  std::string op;
-  RankOpStatus status;
-};
-
 struct CollectiveStatus {
   int size = -1;
   int ranks_done = 0;
-  int bad_events = 0;
-  std::unordered_map<int, RankStatus> rank_map;
   CancelationToken timer;
 
-  void start(int rank, const std::string& coll_name) {
-    if (rank_map.count(rank) > 0) {
-      rank_map[rank].status = BadEventOrdering;
-    } else {
-      rank_map[rank] = RankStatus{coll_name, Start};
-    }
-  }
-
-  bool end(int rank, const std::string& coll_name) {
-    if (rank_map.count(rank) == 0) {
-      rank_map[rank] = RankStatus{coll_name, BadEventOrdering};
-      ++bad_events;
-    } else {
-      if (rank_map[rank].status != Start) {
-        rank_map[rank].status = BadEventOrdering;
-        ++bad_events;
-      } else {
-        rank_map[rank].status = End;
-        ++ranks_done;
-      }
-    }
+  bool isDone() {
     return ranks_done == size;
   }
 };
 
+struct CollectiveEvent {
+  std::string op = "";
+  int64_t sequence_number = 1;
+
+  bool isValid() {
+    return sequence_number > 0;
+  }
+};
+
+enum RankStep { Unknown, Start, End };
+
+struct RankState {
+  CollectiveEvent start;
+  CollectiveEvent end;
+  RankStep step = Unknown;
+};
+
 struct PgData {
   int pg_size;
-  int registered_ranks;
+  int registered_ranks = 0;
+  std::vector<RankState> ranksState;
   std::unordered_map<int64_t, CollectiveStatus> collectives;
+
+  explicit PgData(int pg_size) : pg_size(pg_size) {
+    ranksState.resize(pg_size);
+  }
 
   bool collectiveStart(
       int rank,
       int64_t sequence_number,
       const std::string& coll_name) {
+    ranksState[rank].start.op = coll_name;
+    ranksState[rank].start.sequence_number = sequence_number;
+    ranksState[rank].step = Start;
+
     auto it = collectives.find(sequence_number);
     if (it == collectives.end()) {
       collectives[sequence_number].size = pg_size;
-      collectives[sequence_number].start(rank, coll_name);
+      collectives[sequence_number].ranks_done++;
       return true;
     } else {
-      it->second.start(rank, coll_name);
+      collectives[sequence_number].ranks_done++;
       return false;
     }
   }
@@ -1289,11 +1286,16 @@ struct PgData {
       int rank,
       int64_t sequence_number,
       const std::string& coll_name) {
+    ranksState[rank].end.op = coll_name;
+    ranksState[rank].end.sequence_number = sequence_number;
+    ranksState[rank].step = End;
+
     auto it = collectives.find(sequence_number);
     if (it == collectives.end()) {
       return true;
     } else {
-      if (it->second.end(rank, coll_name)) {
+      it->second.ranks_done++;
+      if (it->second.isDone()) {
         it->second.timer.cancel();
         collectives.erase(it);
         return true;
@@ -1305,6 +1307,7 @@ struct PgData {
   std::string buildDesyncReport(int64_t sequence_number) {
     std::string report;
     std::vector<int> missingRanks;
+    std::string thisCol = "unknown";
     if (collectives.count(sequence_number) == 0) {
       return c10::str(
           "Timeout at collective #",
@@ -1312,20 +1315,12 @@ struct PgData {
           " but there's no information on it left");
     }
     for (const auto rank : c10::irange(pg_size)) {
-      bool found = false;
-      for (auto& it : collectives) {
-        if (it.second.rank_map.count(rank) == 1) {
-          found = true;
-          break;
-        }
-      }
-
-      if (!found) {
+      if (!ranksState[rank].start.isValid()) {
         missingRanks.emplace_back(rank);
+      } else if (thisCol.size() == 0) {
+        thisCol = ranksState[rank].start.op;
       }
     }
-
-    auto thisCol = collectives[sequence_number].rank_map.begin()->second.op;
 
     report +=
         c10::str("\nTimeout at collective: ", thisCol, ", #", sequence_number);
@@ -1346,11 +1341,12 @@ struct PgData {
       std::unordered_map<std::string, std::vector<int>> collectivesStart;
       std::unordered_map<std::string, std::vector<int>> collectivesEnd;
 
-      for (auto& rinfo : it.second.rank_map) {
-        if (rinfo.second.status == Start) {
-          collectivesStart[rinfo.second.op].push_back(rinfo.first);
-        } else {
-          collectivesEnd[rinfo.second.op].push_back(rinfo.first);
+      for (int i : c10::irange(pg_size)) {
+        auto& rs = ranksState[i];
+        if (rs.step == Start && rs.start.sequence_number == seq) {
+          collectivesStart[rs.start.op].push_back(i);
+        } else if (rs.step == End && rs.end.sequence_number == seq) {
+          collectivesEnd[rs.start.op].push_back(i);
         }
       }
 
@@ -1389,15 +1385,14 @@ struct PgData {
   inline std::string analyzeLaggingRanks(int64_t sequence_number) {
     std::vector<int> startRanks;
     std::vector<int> endRanks;
-    for (auto& it : collectives) {
-      for (auto& rinfo : it.second.rank_map) {
-        if (rinfo.second.status == Start) {
-          startRanks.emplace_back(rinfo.first);
-        } else {
-          endRanks.emplace_back(rinfo.first);
-        }
+    for (int i : c10::irange(pg_size)) {
+      if (ranksState[i].step == Start) {
+        startRanks.emplace_back(i);
+      } else if (ranksState[i].step == End) {
+        endRanks.emplace_back(i);
       }
     }
+
     std::string report =
         "\n\t - To our best knowledge, the lagging/dead/mismatched ranks "
         "that caused the desync are:";
@@ -1430,20 +1425,20 @@ class DebugService : public ServiceBase {
   void registerPg(const std::string& pg_name, int ws, int rank) {
     // for now, we ignore rank
     if (pg_registry.count(pg_name) == 0) {
-      pg_registry[pg_name] = PgData{ws, 1};
-    } else {
-      pg_registry[pg_name].registered_ranks += 1;
+      pg_registry.emplace(pg_name, ws);
     }
+    pg_registry.at(pg_name).registered_ranks += 1;
     if (isPgReady(pg_name)) {
       wakeupWaitingClients(pg_name);
     }
   }
 
   void checkCollective(const std::string& pg_name, int64_t sequence_number) {
-    if (pg_registry[pg_name].collectives.count(sequence_number) == 0) {
+    auto& pg_data = pg_registry.at(pg_name);
+    if (pg_data.collectives.count(sequence_number) == 0) {
       return;
     }
-    auto res = pg_registry[pg_name].buildDesyncReport(sequence_number);
+    auto res = pg_data.buildDesyncReport(sequence_number);
     printf(
         "ProcessGroup:%s SEQ:%ld timeout::%s\n",
         pg_name.c_str(),
