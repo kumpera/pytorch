@@ -22,7 +22,7 @@ void Backend::emitCollectiveStart(const Work& work) {
   evt.event_kind = details::EventKind::CollectionStart;
   evt.timestamp =
       std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-  evt.pg_name = getName();
+  evt.pg_name = getGroupName();
   evt.backend = getBackendName();
   evt.sequence_number =
       sequenceNum_.has_value() ? (int64_t)sequenceNum_.value().get() : -1;
@@ -36,7 +36,7 @@ void Backend::emitCollectiveEnd(const Work& work) {
   evt.event_kind = details::EventKind::CollectionEnd;
   evt.timestamp =
       std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-  evt.pg_name = getName();
+  evt.pg_name = getGroupName();
   evt.backend = getBackendName();
   evt.sequence_number =
       sequenceNum_.has_value() ? (int64_t)sequenceNum_.value().get() : -1;

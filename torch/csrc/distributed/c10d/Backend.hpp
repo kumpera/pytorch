@@ -350,7 +350,7 @@ class TORCH_API Backend : public torch::CustomClassHolder {
     pg_name_ = name;
   }
 
-  const std::string& getName() const {
+  const std::string& getGroupName() const {
     return pg_name_;
   }
 

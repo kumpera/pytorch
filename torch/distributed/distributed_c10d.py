@@ -1372,6 +1372,10 @@ def _new_process_group_helper(
     _world.pg_map[pg] = (backend, prefix_store)
     _world.pg_names[pg] = group_name
     _world.pg_backend_config[pg] = str(backend_config)
+
+    assert group_name is not None
+    pg._set_group_name(group_name)
+
     # "" is the default tag for user PGs
     if pg_tag in [None, ""]:
         pg_tag = f"ptd:{group_name}"
