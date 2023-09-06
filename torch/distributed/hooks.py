@@ -97,6 +97,7 @@ def _lazy_init():
     global _pp_w
     _pp_r, _pp_w = os.pipe()
     _enable_event_collection(_pp_w)
+    c10d._enable_collectives_timing()
     _cb_thread = threading.Thread(target=_c10d_pg_hooks_loops, daemon=True)
     _cb_thread.start()
     logger.info("c10d::hooks thread enabled")
@@ -142,7 +143,7 @@ def enable_collective_timing() -> None:
     """
     Enables execution timing of collectives.
 
-    This method doesn't guarantee it will enable for PGs created prior to calling it.
-    Note that timing collection can impact perform of NCCL collectives as it uses CUDA events to track it.
+    Currently we always enable timing information for NCCL and GLOO.
+    This option might be needed in the future.
     """
-    raise RuntimeError("collective timing not yet supported")
+    pass

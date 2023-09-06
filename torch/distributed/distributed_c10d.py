@@ -448,6 +448,7 @@ class _World:
         self._pg_coalesce_state: Dict[ProcessGroup, List[Union[_CollOp, P2POp]]] = {}
         self._pg_default_device: Dict[ProcessGroup, torch.device] = {}
         self._hook_state = _HookState()
+        self.enable_collectives_timing = False
 
     @property
     def default_pg(self):
@@ -1372,6 +1373,8 @@ def _new_process_group_helper(
     _world.pg_map[pg] = (backend, prefix_store)
     _world.pg_names[pg] = group_name
     _world.pg_backend_config[pg] = str(backend_config)
+    if _world.enable_collectives_timing:
+        pg._enable_collectives_timing()
 
     assert group_name is not None
     pg._set_group_name(group_name)
@@ -4330,3 +4333,8 @@ dynamo_unsupported_distributed_c10d_ops = [
 
 def _register_creation_hook(hook):
     _world.pg_hook_state.register_creation_hook(hook)
+
+def _enable_collectives_timing():
+    _world.enable_collectives_timing = True
+    for pg in _world.pg_map:
+        pg._enable_collectives_timing()

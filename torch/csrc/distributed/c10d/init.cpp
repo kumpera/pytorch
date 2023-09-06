@@ -1791,6 +1791,11 @@ Arguments:
               &::c10d::ProcessGroup::setGroupName,
               py::call_guard<py::gil_scoped_acquire>(),
               "Sets the process group name. This is an internal C10D method, do not use.")
+          .def(
+              "_enable_collectives_timing",
+              &::c10d::ProcessGroup::enableCollectivesTiming,
+              py::call_guard<py::gil_scoped_acquire>(),
+              "Enable timing of collectives by all backends. This might incur in additional overhead.")
           .def_property_readonly(
               "group_name",
               &::c10d::ProcessGroup::getGroupName,
