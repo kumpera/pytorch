@@ -181,6 +181,9 @@ class TORCH_API ProcessGroupNCCL : public Backend {
     // The cached list of CUDA devices to operate on
     std::vector<at::Device> devices_;
 
+    std::atomic<bool> started_ = false;
+    std::atomic<bool> completed_ = false;
+
     // The start CUDA events of NCCL operator tracking this work item on
     // multiple CUDA devices. These start CUDA events are needed by desync
     // debugging if enabled.
@@ -590,6 +593,8 @@ class TORCH_API ProcessGroupNCCL : public Backend {
   // object might get destroyed before the WorkNCCL object.
   void ncclCommWatchdog();
 
+  void ncclCommsMonitor();
+
   // Performs a health check by initializing dummy NCCL communicators and then
   // destroying them. This will help indicate and signal any NCCL-related issues
   // prior to the first collective. The actual initialization and subsequent
@@ -606,6 +611,7 @@ class TORCH_API ProcessGroupNCCL : public Backend {
   // Takes care of cleaning up completed work, and aborting upon failure or
   // timeout.
   void workCleanupLoop();
+  void workMonitorLoop();
 
   void runHookLoop();
 
@@ -679,6 +685,7 @@ class TORCH_API ProcessGroupNCCL : public Backend {
   std::mutex mutex_;
 
   // Watchdog thread which looks for errors on the cached NCCL communicators.
+  std::thread ncclCommMonitorThread_;
   std::thread ncclCommWatchdogThread_;
 
   std::thread onCompletionHookThread_;
@@ -781,6 +788,7 @@ class TORCH_API ProcessGroupNCCL : public Backend {
   // Counting for the sequential number of NCCL collective call.
   uint64_t seq_{0};
 
+  std::exception_ptr commsMonitorException_ = nullptr;
   std::exception_ptr watchDogException_ = nullptr;
 
 #ifdef USE_NCCL_WITH_UCC
@@ -788,6 +796,8 @@ class TORCH_API ProcessGroupNCCL : public Backend {
   static std::shared_ptr<at::DynamicLibrary> uccLib_;
   c10::intrusive_ptr<Backend> uccPG_;
 #endif
+  typedef std::chrono::time_point<std::chrono::steady_clock> time_point;
+  std::atomic<time_point> lastMonitorStart_;
 };
 
 } // namespace c10d

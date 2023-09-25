@@ -362,13 +362,24 @@ ProcessGroupNCCL::WorkNCCL::WorkNCCL(const WorkNCCL& w)
 ProcessGroupNCCL::WorkNCCL::~WorkNCCL() = default;
 
 bool ProcessGroupNCCL::WorkNCCL::isCompleted() {
+  if (completed_.load()) {
+    return true;
+  }
   checkAndSetException();
-  return exception() || finishedGPUExecutionInternal();
+  if (exception() || finishedGPUExecutionInternal()) {
+    completed_.store(true);
+    return true;
+  }
+  return false;
 }
 
 bool ProcessGroupNCCL::WorkNCCL::isStarted() {
   checkAndSetException();
-  return exception() || startedGPUExecutionInternal();
+  if (exception() || startedGPUExecutionInternal()) {
+    started_.store(true);
+    return true;
+  }
+  return false;
 }
 
 bool ProcessGroupNCCL::WorkNCCL::isSuccess() const {
@@ -680,6 +691,8 @@ ProcessGroupNCCL::ProcessGroupNCCL(
   }
 
 #ifdef ENABLE_NCCL_ERROR_CHECKING
+  ncclCommMonitorThread_ =
+      std::thread(&ProcessGroupNCCL::ncclCommsMonitor, this);
   ncclCommWatchdogThread_ =
       std::thread(&ProcessGroupNCCL::ncclCommWatchdog, this);
 #endif
@@ -895,8 +908,9 @@ void ProcessGroupNCCL::abort(c10::optional<std::string> abortReason) {
 ProcessGroupNCCL::~ProcessGroupNCCL() {
   terminateProcessGroup_.store(true);
 
-  workMetaListCV_.notify_one();
+  workMetaListCV_.notify_all();
 #ifdef ENABLE_NCCL_ERROR_CHECKING
+  ncclCommMonitorThread_.join();
   ncclCommWatchdogThread_.join();
 #endif
 
@@ -906,6 +920,33 @@ ProcessGroupNCCL::~ProcessGroupNCCL() {
   // Abort all NCCL Communicators on Process Group Destruction
   std::string abortReason = c10::str("Process Group destroyed on rank ", rank_);
   abort(abortReason);
+}
+
+void ProcessGroupNCCL::ncclCommsMonitor() {
+  try {
+    VLOG(2) << "[Rank " << rank_ << "] NCCL comms monitor thread started!";
+    workMonitorLoop();
+    VLOG(2) << "[Rank " << rank_
+            << "] NCCL comms monitor thread terminated normally";
+  } catch (std::exception& e) {
+    // Append error message reported from workMonitorLoop
+    const auto exitMsg = c10::str(
+        "[Rank ",
+        rank_,
+        "] NCCL comms monitor thread terminated with exception: ",
+        e.what());
+    LOG(ERROR) << exitMsg;
+    watchDogException_ = std::make_exception_ptr(std::runtime_error(exitMsg));
+    std::rethrow_exception(watchDogException_);
+  } catch (...) {
+    const auto exitMsg = c10::str(
+        "[Rank ",
+        rank_,
+        "] NCCL watchdog thread terminated with exception: unknown");
+    LOG(ERROR) << exitMsg;
+    watchDogException_ = std::make_exception_ptr(std::runtime_error(exitMsg));
+    std::rethrow_exception(watchDogException_);
+  }
 }
 
 void ProcessGroupNCCL::ncclCommWatchdog() {
@@ -919,19 +960,21 @@ void ProcessGroupNCCL::ncclCommWatchdog() {
     const auto exitMsg = c10::str(
         "[Rank ",
         rank_,
-        "] NCCL watchdog thread terminated with exception: ",
+        "] NCCL comms monitor thread terminated with exception: ",
         e.what());
     LOG(ERROR) << exitMsg;
-    watchDogException_ = std::make_exception_ptr(std::runtime_error(exitMsg));
-    std::rethrow_exception(watchDogException_);
+    commsMonitorException_ =
+        std::make_exception_ptr(std::runtime_error(exitMsg));
+    std::rethrow_exception(commsMonitorException_);
   } catch (...) {
     const auto exitMsg = c10::str(
         "[Rank ",
         rank_,
-        "] NCCL watchdog thread terminated with exception: unknown");
+        "] NCCL comms monitor thread terminated with exception: unknown");
     LOG(ERROR) << exitMsg;
-    watchDogException_ = std::make_exception_ptr(std::runtime_error(exitMsg));
-    std::rethrow_exception(watchDogException_);
+    commsMonitorException_ =
+        std::make_exception_ptr(std::runtime_error(exitMsg));
+    std::rethrow_exception(commsMonitorException_);
   }
 }
 
@@ -960,6 +1003,43 @@ void ProcessGroupNCCL::logWorkEnd(WorkNCCL& work) {
       store_, traceKeyEnd_, work.seq_, opTypeToString(work.opType_));
 }
 
+void ProcessGroupNCCL::workMonitorLoop() {
+  bool done = false;
+  while (!done || !terminateProcessGroup_.load()) {
+    std::unique_lock<std::mutex> lock(workMetaListMutex_);
+    // We busy-poll the work vector every kWatchdogThreadSleepMillis
+    // milliseconds as long as the atomic is True.
+    workMetaListCV_.wait_for(
+        lock,
+        std::chrono::milliseconds(kWatchdogThreadSleepMillis),
+        [&]() -> bool { return terminateProcessGroup_.load(); });
+
+    lastMonitorStart_.store(std::chrono::steady_clock::now());
+
+    for (auto it = workMetaList_.begin(); it != workMetaList_.end(); ++it) {
+      auto& work = *it;
+      // we ignore the result, we just want the side effect of setting stated_
+      work.isStarted();
+      work.checkAndSetException();
+      bool timedOut = work.checkTimeout();
+
+      // If work hits an exception (either an error or timeout)
+      if (work.exception()) {
+        if (SHOULD_CLEAN_UP(asyncErrorHandling_)) {
+          // Abort work and corresponding communicators
+          work.abort();
+          // PG level abort, which would abort all other communicators on this
+          // rank
+          abort();
+        }
+      }
+    }
+
+    done = workMetaList_.empty();
+    lastMonitorStart_.store(time_point());
+  }
+}
+
 void ProcessGroupNCCL::workCleanupLoop() {
   bool done = false;
 
@@ -973,23 +1053,17 @@ void ProcessGroupNCCL::workCleanupLoop() {
         std::chrono::milliseconds(kWatchdogThreadSleepMillis),
         [&]() -> bool { return terminateProcessGroup_.load(); });
 
-    for (auto it = workMetaList_.begin(); it != workMetaList_.end();
-         /* no increment */) {
-      auto& work = *it;
-      work.checkAndSetException();
-      bool timedOut = work.checkTimeout();
-
-      // If work hits an exception (either an error or timeout)
-      if (work.exception()) {
-        if (SHOULD_CLEAN_UP(asyncErrorHandling_)) {
-          // Abort work and corresponding communicators
-          work.abort();
-          // PG level abort, which would abort all other communicators on this
-          // rank
-          abort();
-        }
-        // Report desync state in case of timeout
-        if (desyncDebug_ && timedOut) {
+    auto monitorLastStart = lastMonitorStart_.load();
+    if (monitorLastStart != time_point()) {
+      auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - monitorLastStart)
+                      .count();
+      // TODO use a constant here
+      // if the mon thread is running for this long, it's stuck
+      if (diff > (10 * 1000)) {
+        LOG(ERROR) << "Monitor thread running for {} seconds."
+                   << " This is too long and it should be stuck";
+        if (desyncDebug_) {
           try {
             auto desyncMsg = retrieveDesyncReport(store_, "NCCL", rank_, size_);
             LOG(ERROR) << desyncMsg;
@@ -1002,22 +1076,68 @@ void ProcessGroupNCCL::workCleanupLoop() {
                 << " Please file an issue.";
           }
         }
-        // Throw exception
-        work.handleException(asyncErrorHandling_);
+        if (SHOULD_TEAR_DOWN(asyncErrorHandling_)) {
+          auto tearDownMsg = c10::str(
+              "To avoid data inconsistency, we are taking the entire process down.");
+          LOG(ERROR) << tearDownMsg;
+          TORCH_CHECK(false, tearDownMsg);
+        }
+      }
+    }
+
+    for (auto it = workMetaList_.begin(); it != workMetaList_.end();
+         /* no increment */) {
+      auto& work = *it;
+
+      // We wait for the monitor loop to check those variables
+      auto work_completed = work.completed_.load();
+      auto work_started = work.started_.load();
+
+      if (work_completed) {
+        work.checkAndSetException();
+        bool timedOut = work.checkTimeout();
+
+        // If work hits an exception (either an error or timeout)
+        if (work.exception()) {
+          if (SHOULD_CLEAN_UP(asyncErrorHandling_)) {
+            // Abort work and corresponding communicators
+            work.abort();
+            // PG level abort, which would abort all other communicators on this
+            // rank
+            abort();
+          }
+          // Report desync state in case of timeout
+          if (desyncDebug_ && timedOut) {
+            try {
+              auto desyncMsg =
+                  retrieveDesyncReport(store_, "NCCL", rank_, size_);
+              LOG(ERROR) << desyncMsg;
+            } catch (const std::exception& e) {
+              LOG(ERROR) << "Failed to retrieve NCCL_DESYNC_DEBUG report. "
+                         << " Please file an issue. Error: " << e.what();
+            } catch (...) {
+              LOG(ERROR)
+                  << "Failed to rerieve NCCL_DESYNC_DEBUG report with unknown error."
+                  << " Please file an issue.";
+            }
+          }
+          // Throw exception
+          work.handleException(asyncErrorHandling_);
+        }
       }
 
       // Work status logging for desync debug
       if (desyncDebug_) {
-        if (work.isStarted()) {
+        if (work_started) {
           logWorkStart(work);
         }
-        if (work.isCompleted()) {
+        if (work_completed) {
           logWorkEnd(work);
         }
       }
 
       // Clean up completed work
-      if (work.isCompleted()) {
+      if (work_completed) {
         if (onCompletionHook_) {
           // Move Work object to completedWorkList_ to be consumed by the hook
           // thread
