@@ -703,7 +703,7 @@ class TORCH_API ProcessGroupNCCL : public Backend {
   std::condition_variable workMetaListCV_;
 
   // Vector to Store WorkNCCL pointers
-  std::list<ProcessGroupNCCL::WorkNCCL> workMetaList_;
+  std::list<std::shared_ptr<ProcessGroupNCCL::WorkNCCL>> workMetaList_;
 
   // Mutex to Guard workMetaList_
   std::mutex completedWorkListMutex_;

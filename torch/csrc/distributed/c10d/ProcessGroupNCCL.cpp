@@ -368,6 +368,7 @@ bool ProcessGroupNCCL::WorkNCCL::isCompleted() {
   }
   checkAndSetException();
   if (exception() || finishedGPUExecutionInternal()) {
+    started_.store(true);
     completed_.store(true);
     return true;
   }
@@ -1007,7 +1008,7 @@ void ProcessGroupNCCL::logWorkEnd(WorkNCCL& work) {
 void ProcessGroupNCCL::workMonitorLoop() {
   bool done = false;
   //needs to use a copy since we must drop workMetaListMutex_ during the main loop
-  std::list<ProcessGroupNCCL::WorkNCCL> workCopy;
+  std::list<std::shared_ptr<ProcessGroupNCCL::WorkNCCL>> workCopy;
   while (!done || !terminateProcessGroup_.load()) {
     {
       std::unique_lock<std::mutex> lock(workMetaListMutex_);
@@ -1025,17 +1026,17 @@ void ProcessGroupNCCL::workMonitorLoop() {
 
     //LOCKING: NO LOCKS - the calls to isStarted and isCompleted are hang hazzards
     for (auto it = workCopy.begin(); it != workCopy.end(); ++it) {
-      auto& work = *it;
+      auto work = *it;
       // we ignore the result, we just want the side effect of setting stated_
-      bool is =work.isStarted();
-      bool ic = work.isCompleted();
-      printf("[%d] mon checking %ld started: %d completed: %d (is %d ic %d)\n", rank_, work.seq_, work.started_.load(), work.completed_.load(), is, ic);
+      bool is = work->isStarted();
+      bool ic = work->isCompleted();
+      printf("[%d] mon checking %ld started: %d completed: %d (is %d ic %d)\n", rank_, work->seq_, work->started_.load(), work->completed_.load(), is, ic);
 
       // If work hits an exception (either an error or timeout)
-      if (work.exception()) {
+      if (work->exception()) {
         if (SHOULD_CLEAN_UP(asyncErrorHandling_)) {
           // Abort work and corresponding communicators
-          work.abort();
+          work->abort();
           // PG level abort, which would abort all other communicators on this
           // rank
           abort();
@@ -1044,6 +1045,8 @@ void ProcessGroupNCCL::workMonitorLoop() {
     }
 
     done = workCopy.empty();
+    workCopy.clear();
+
     lastMonitorStart_.store(time_point());
   }
 }
@@ -1097,26 +1100,18 @@ void ProcessGroupNCCL::workCleanupLoop() {
 
     for (auto it = workMetaList_.begin(); it != workMetaList_.end();
          /* no increment */) {
-      auto& work = *it;
+      auto work = *it;
 
       // We wait for the monitor loop to check those variables
-      auto work_completed = work.completed_.load();
-      auto work_started = work.started_.load();
-      printf("[%d] dog checking %ld started: %d completed: %d\n", rank_, work.seq_, work_started, work_completed);
+      auto work_completed = work->completed_.load();
+      auto work_started = work->started_.load();
+      printf("[%d] dog checking %ld started: %d completed: %d\n", rank_, work->seq_, work_started, work_completed);
 
       if (work_completed) {
-        work.checkAndSetException();
-        bool timedOut = work.checkTimeout();
+        bool timedOut = work->checkTimeout();
 
         // If work hits an exception (either an error or timeout)
-        if (work.exception()) {
-          if (SHOULD_CLEAN_UP(asyncErrorHandling_)) {
-            // Abort work and corresponding communicators
-            work.abort();
-            // PG level abort, which would abort all other communicators on this
-            // rank
-            abort();
-          }
+        if (work->exception()) {
           // Report desync state in case of timeout
           if (desyncDebug_ && timedOut) {
             try {
@@ -1133,17 +1128,17 @@ void ProcessGroupNCCL::workCleanupLoop() {
             }
           }
           // Throw exception
-          work.handleException(asyncErrorHandling_);
+          work->handleException(asyncErrorHandling_);
         }
       }
 
       // Work status logging for desync debug
       if (desyncDebug_) {
         if (work_started) {
-          logWorkStart(work);
+          logWorkStart(*work);
         }
         if (work_completed) {
-          logWorkEnd(work);
+          logWorkEnd(*work);
         }
       }
 
@@ -1154,13 +1149,13 @@ void ProcessGroupNCCL::workCleanupLoop() {
           // thread
           {
             const std::lock_guard<std::mutex> lock(completedWorkListMutex_);
-            completedWorkList_.splice(
-                completedWorkList_.end(), workMetaList_, it++);
+            completedWorkList_.emplace_back(*work);
+            // completedWorkList_.splice(
+            //     completedWorkList_.end(), workMetaList_, it++);
           }
           completedWorkListCV_.notify_one();
-        } else {
-          it = workMetaList_.erase(it);
         }
+        it = workMetaList_.erase(it);
       } else {
         // Increment the iterator if the current WorkNCCL object is not
         // completed.
