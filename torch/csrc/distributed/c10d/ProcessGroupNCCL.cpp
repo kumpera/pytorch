@@ -283,7 +283,7 @@ inline void errorIfCapturingNonCapturableNCCL(c10::cuda::CaptureStatus status) {
 
 } // namespace
 
-const int64_t ProcessGroupNCCL::kWatchdogThreadSleepMillis = 1000;
+const int64_t ProcessGroupNCCL::kWatchdogThreadSleepMillis = 5000;
 constexpr int64_t kSynchronizeBusyWaitMillis = 10;
 thread_local uint64_t ProcessGroupNCCL::ncclActiveGroupCounter_ = 0;
 
@@ -361,6 +361,7 @@ ProcessGroupNCCL::WorkNCCL::WorkNCCL(const WorkNCCL& w)
 
 ProcessGroupNCCL::WorkNCCL::~WorkNCCL() = default;
 
+//LOCKING: hanging hazzard, call
 bool ProcessGroupNCCL::WorkNCCL::isCompleted() {
   if (completed_.load()) {
     return true;
@@ -1005,23 +1006,30 @@ void ProcessGroupNCCL::logWorkEnd(WorkNCCL& work) {
 
 void ProcessGroupNCCL::workMonitorLoop() {
   bool done = false;
+  //needs to use a copy since we must drop workMetaListMutex_ during the main loop
+  std::list<ProcessGroupNCCL::WorkNCCL> workCopy;
   while (!done || !terminateProcessGroup_.load()) {
-    std::unique_lock<std::mutex> lock(workMetaListMutex_);
-    // We busy-poll the work vector every kWatchdogThreadSleepMillis
-    // milliseconds as long as the atomic is True.
-    workMetaListCV_.wait_for(
-        lock,
-        std::chrono::milliseconds(kWatchdogThreadSleepMillis),
-        [&]() -> bool { return terminateProcessGroup_.load(); });
+    {
+      std::unique_lock<std::mutex> lock(workMetaListMutex_);
+      // We busy-poll the work vector every kWatchdogThreadSleepMillis
+      // milliseconds as long as the atomic is True.
+      workMetaListCV_.wait_for(
+          lock,
+          std::chrono::milliseconds(kWatchdogThreadSleepMillis),
+          [&]() -> bool { return terminateProcessGroup_.load(); });
+      printf("[%d] mon loop done: %d terminate: %d queue-size: %zu\n", rank_, done, terminateProcessGroup_.load(), workMetaList_.size());
 
-    lastMonitorStart_.store(std::chrono::steady_clock::now());
+      lastMonitorStart_.store(std::chrono::steady_clock::now());
+      std::copy(workMetaList_.begin(), workMetaList_.end(), std::back_inserter(workCopy));
+    }
 
-    for (auto it = workMetaList_.begin(); it != workMetaList_.end(); ++it) {
+    //LOCKING: NO LOCKS - the calls to isStarted and isCompleted are hang hazzards
+    for (auto it = workCopy.begin(); it != workCopy.end(); ++it) {
       auto& work = *it;
       // we ignore the result, we just want the side effect of setting stated_
-      work.isStarted();
-      work.checkAndSetException();
-      bool timedOut = work.checkTimeout();
+      bool is =work.isStarted();
+      bool ic = work.isCompleted();
+      printf("[%d] mon checking %ld started: %d completed: %d (is %d ic %d)\n", rank_, work.seq_, work.started_.load(), work.completed_.load(), is, ic);
 
       // If work hits an exception (either an error or timeout)
       if (work.exception()) {
@@ -1035,7 +1043,7 @@ void ProcessGroupNCCL::workMonitorLoop() {
       }
     }
 
-    done = workMetaList_.empty();
+    done = workCopy.empty();
     lastMonitorStart_.store(time_point());
   }
 }
@@ -1053,11 +1061,13 @@ void ProcessGroupNCCL::workCleanupLoop() {
         std::chrono::milliseconds(kWatchdogThreadSleepMillis),
         [&]() -> bool { return terminateProcessGroup_.load(); });
 
+    printf("[%d] dog loop done: %d terminate: %d queue-size: %zu\n", rank_, done, terminateProcessGroup_.load(), workMetaList_.size());
     auto monitorLastStart = lastMonitorStart_.load();
     if (monitorLastStart != time_point()) {
       auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::steady_clock::now() - monitorLastStart)
                       .count();
+      printf("[%d] dogmon taking %ld millis\n", rank_, diff);
       // TODO use a constant here
       // if the mon thread is running for this long, it's stuck
       if (diff > (10 * 1000)) {
@@ -1092,6 +1102,7 @@ void ProcessGroupNCCL::workCleanupLoop() {
       // We wait for the monitor loop to check those variables
       auto work_completed = work.completed_.load();
       auto work_started = work.started_.load();
+      printf("[%d] dog checking %ld started: %d completed: %d\n", rank_, work.seq_, work_started, work_completed);
 
       if (work_completed) {
         work.checkAndSetException();
